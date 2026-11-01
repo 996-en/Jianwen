@@ -1,0 +1,11 @@
+node_modules/
+dist/
+cache/
+# 本地 whisper.cpp 二进制与模型（约 2.2 GB，单文件最大 1.5 GB，超出 GitHub 单文件 100 MB 限制）
+# 只保留说明文档入库，二进制本身不入库
+Release/*
+!Release/README.md
+*.log
+.env
+.DS_Store
+coverage/

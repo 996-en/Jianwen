@@ -1,0 +1,447 @@
+import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { bilibiliUserAgent } from "../config.js";
+import { VideoMcpError, type FetchAssetsOptions, type VideoRef } from "../types.js";
+import type { MediaFetchResult, PlatformAdapter } from "./types.js";
+import { fetchStoryboardFrames } from "./bilibili-storyboard.js";
+
+const BV_RE = /BV[0-9A-Za-z]{10}/;
+const AV_RE = /(?:av|AV)(\d+)/;
+const BILIBILI_HOST_RE =
+  /(?:https?:\/\/)?(?:www\.|m\.)?bilibili\.com\//i;
+const B23_RE = /(?:https?:\/\/)?b23\.tv\/[A-Za-z0-9]+/i;
+
+export function extractBvId(input: string): string | null {
+  const m = input.match(BV_RE);
+  return m ? m[0] : null;
+}
+
+export function extractAvId(input: string): string | null {
+  const m = input.match(AV_RE);
+  return m ? m[1]! : null;
+}
+
+export function isBilibiliInput(input: string): boolean {
+  const s = input.trim();
+  if (BV_RE.test(s)) return true;
+  if (AV_RE.test(s)) return true;
+  if (BILIBILI_HOST_RE.test(s)) return true;
+  if (B23_RE.test(s)) return true;
+  return false;
+}
+
+async function fetchText(url: string, init?: RequestInit): Promise<string> {
+  const res = await fetch(url, {
+    ...init,
+    headers: {
+      "User-Agent": bilibiliUserAgent(),
+      Referer: "https://www.bilibili.com/",
+      ...(init?.headers ?? {}),
+    },
+    redirect: "follow",
+  });
+  if (!res.ok) {
+    throw new VideoMcpError(
+      `HTTP ${res.status} fetching ${url}`,
+      res.status === 404 ? "NOT_FOUND" : "DOWNLOAD_FAILED",
+    );
+  }
+  return res.text();
+}
+
+async function fetchJson<T>(url: string): Promise<T> {
+  const text = await fetchText(url);
+  return JSON.parse(text) as T;
+}
+
+async function resolveShortLink(url: string): Promise<string> {
+  const res = await fetch(url, {
+    method: "GET",
+    redirect: "follow",
+    headers: { "User-Agent": bilibiliUserAgent() },
+  });
+  return res.url;
+}
+
+function commandExists(cmd: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, ["--version"], {
+      stdio: "ignore",
+      shell: process.platform === "win32",
+    });
+    child.on("error", () => resolve(false));
+    child.on("exit", (code) => resolve(code === 0));
+  });
+}
+
+function runCommand(
+  cmd: string,
+  args: string[],
+  cwd?: string,
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, {
+      cwd,
+      shell: process.platform === "win32",
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d) => (stdout += d.toString()));
+    child.stderr?.on("data", (d) => (stderr += d.toString()));
+    child.on("error", (err) => reject(err));
+    child.on("exit", (code) => {
+      if (code === 0) resolve({ stdout, stderr });
+      else
+        reject(
+          new Error(
+            `${cmd} exited ${code}: ${stderr.slice(-800) || stdout.slice(-800)}`,
+          ),
+        );
+    });
+  });
+}
+
+interface ViewApiResponse {
+  code: number;
+  message: string;
+  data?: {
+    bvid: string;
+    aid: number;
+    title: string;
+    duration: number;
+    owner?: { name: string; mid: number };
+    pubdate?: number;
+    stat?: {
+      view?: number;
+      share?: number;
+      reply?: number;
+      like?: number;
+      favorite?: number;
+      coin?: number;
+      danmaku?: number;
+    };
+    pages?: Array<{ cid: number; page: number; part: string; duration: number }>;
+    rights?: { pay?: number; ugc_pay?: number };
+  };
+}
+
+interface PlayerResponse {
+  code: number;
+  message: string;
+  data?: {
+    subtitle?: {
+      subtitles?: Array<{
+        lan: string;
+        lan_doc: string;
+        subtitle_url: string;
+      }>;
+    };
+  };
+}
+
+interface PlayUrlResponse {
+  code: number;
+  message: string;
+  data?: {
+    dash?: {
+      audio?: Array<{ baseUrl?: string; base_url?: string }>;
+      video?: Array<{ baseUrl?: string; base_url?: string }>;
+    };
+    durl?: Array<{ url: string }>;
+  };
+}
+
+export class BilibiliAdapter implements PlatformAdapter {
+  readonly platform = "bilibili";
+
+  canHandle(input: string): boolean {
+    return isBilibiliInput(input);
+  }
+
+  async resolve(input: string): Promise<VideoRef> {
+    let raw = input.trim();
+    if (B23_RE.test(raw)) {
+      if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
+      raw = await resolveShortLink(raw);
+    }
+
+    let bvid = extractBvId(raw);
+    const avid = extractAvId(raw);
+
+    let apiUrl: string;
+    if (bvid) {
+      apiUrl = `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`;
+    } else if (avid) {
+      apiUrl = `https://api.bilibili.com/x/web-interface/view?aid=${encodeURIComponent(avid)}`;
+    } else {
+      throw new VideoMcpError(
+        `Could not parse a Bilibili BV/av id from: ${input}`,
+        "UNSUPPORTED_URL",
+      );
+    }
+
+    const json = await fetchJson<ViewApiResponse>(apiUrl);
+    if (json.code === -404 || json.code === 62002) {
+      throw new VideoMcpError(
+        `Video not found or unavailable: ${json.message}`,
+        "NOT_FOUND",
+      );
+    }
+    if (json.code !== 0 || !json.data) {
+      const msg = json.message || `code ${json.code}`;
+      if (/登录|login|会员|大会员|pay/i.test(msg)) {
+        throw new VideoMcpError(
+          `VIP or login required (v1 has no cookies): ${msg}`,
+          "VIP_OR_LOGIN",
+        );
+      }
+      throw new VideoMcpError(`Bilibili view API failed: ${msg}`, "DOWNLOAD_FAILED");
+    }
+
+    const d = json.data;
+    if (d.rights?.pay === 1 || d.rights?.ugc_pay === 1) {
+      throw new VideoMcpError(
+        "This video requires payment/VIP. v1 does not support login or cookies.",
+        "VIP_OR_LOGIN",
+      );
+    }
+
+    bvid = d.bvid;
+    const page = d.pages?.[0];
+    const durationSec = page?.duration ?? d.duration ?? 0;
+
+    return {
+      platform: "bilibili",
+      id: bvid,
+      title: d.title,
+      durationSec,
+      author: d.owner?.name ?? "unknown",
+      authorId: d.owner?.mid,
+      publishedAt: typeof d.pubdate === "number" && d.pubdate > 0
+        ? new Date(d.pubdate * 1000).toISOString()
+        : undefined,
+      stats: d.stat ? {
+        views: d.stat.view,
+        shares: d.stat.share,
+        comments: d.stat.reply,
+        likes: d.stat.like,
+        favorites: d.stat.favorite,
+        coins: d.stat.coin,
+        danmaku: d.stat.danmaku,
+      } : undefined,
+      pageUrl: `https://www.bilibili.com/video/${bvid}`,
+      extras: {
+        aid: d.aid,
+        cid: page?.cid ?? 0,
+      },
+    };
+  }
+
+  async fetchMedia(
+    ref: VideoRef,
+    destDir: string,
+    options?: FetchAssetsOptions,
+  ): Promise<MediaFetchResult> {
+    await fs.mkdir(destDir, { recursive: true });
+    const result: MediaFetchResult = {};
+
+    const aid = Number(ref.extras?.aid ?? 0);
+    const cid = Number(ref.extras?.cid ?? 0);
+
+    // Subtitles via player API
+    if (options?.wantSubtitles !== false && cid) {
+      try {
+        const playerUrl = `https://api.bilibili.com/x/player/v2?aid=${aid}&cid=${cid}`;
+        const player = await fetchJson<PlayerResponse>(playerUrl);
+        const subs = player.data?.subtitle?.subtitles ?? [];
+        const preferred =
+          subs.find((s) => /zh|ai-zh|中/i.test(s.lan) || /中/i.test(s.lan_doc)) ??
+          subs[0];
+        if (preferred?.subtitle_url) {
+          let subUrl = preferred.subtitle_url;
+          if (subUrl.startsWith("//")) subUrl = `https:${subUrl}`;
+          const body = await fetchText(subUrl);
+          const subtitlePath = path.join(destDir, "subtitle.json");
+          await fs.writeFile(subtitlePath, body, "utf8");
+          result.subtitlePath = subtitlePath;
+          result.subtitleText = subtitleJsonToText(body);
+          const txtPath = path.join(destDir, "subtitle.txt");
+          await fs.writeFile(txtPath, result.subtitleText, "utf8");
+        }
+      } catch {
+        // Subtitles optional; continue
+      }
+    }
+
+    if (options?.wantKeyframes !== false && cid) {
+      try {
+        result.keyframePaths = await fetchStoryboardFrames(
+          ref,
+          destDir,
+          options?.keyframeIntervalSec ?? 10,
+        );
+      } catch (err) {
+        result.storyboardError = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    const needVideo = options?.wantKeyframes !== false && !result.keyframePaths?.length;
+    const needAudio = options?.wantAsr === true && !result.subtitleText;
+    if (!needVideo && !needAudio) return result;
+
+    // 只有 ASR 需要媒体时，优先下载音频轨，不下载整段视频。
+    const audioOnly = needAudio && !needVideo;
+
+    // Prefer yt-dlp when present
+    const hasYtDlp = await commandExists("yt-dlp");
+    if (hasYtDlp) {
+      try {
+        const outTpl = path.join(destDir, `${audioOnly ? "audio" : "media"}.%(ext)s`);
+        await runCommand("yt-dlp", [
+          "-f",
+          audioOnly ? "ba" : "bv*[height<=720]+ba/b[height<=720]/b",
+          "--no-playlist",
+          "-o",
+          outTpl,
+          ref.pageUrl,
+        ]);
+        const files = await fs.readdir(destDir);
+        const media = files.find(
+          (f) =>
+            f.startsWith(audioOnly ? "audio." : "media.") &&
+            !f.endsWith(".json") &&
+            !f.endsWith(".txt") &&
+            !f.endsWith(".vtt"),
+        );
+        if (media) {
+          const full = path.join(destDir, media);
+          const ext = path.extname(media).toLowerCase();
+          if (audioOnly || [".m4a", ".mp3", ".aac", ".opus", ".wav"].includes(ext)) {
+            result.audioPath = full;
+          } else {
+            result.videoPath = full;
+          }
+        }
+        // Also try extracting audio-only if we only got video
+        if (result.videoPath && !result.audioPath) {
+          const audioOut = path.join(destDir, "audio.m4a");
+          try {
+            await runCommand("yt-dlp", [
+              "-f",
+              "ba/b",
+              "-x",
+              "--audio-format",
+              "m4a",
+              "--no-playlist",
+              "-o",
+              audioOut,
+              ref.pageUrl,
+            ]);
+            result.audioPath = audioOut;
+          } catch {
+            // ignore
+          }
+        }
+        return result;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/login|cookie|premium|会员|付费/i.test(msg)) {
+          throw new VideoMcpError(
+            `Download blocked (login/VIP). Install cookies support later or use a public video. Detail: ${msg}`,
+            "VIP_OR_LOGIN",
+          );
+        }
+        // Fall through to HTTP playurl
+      }
+    }
+
+    // Fallback: public playurl API (often needs more headers; may fail)
+    if (!cid || !aid) {
+      throw new VideoMcpError(
+        "Missing aid/cid for playurl fetch. Re-run resolve_video.",
+        "INTERNAL",
+      );
+    }
+
+    const playUrl = `https://api.bilibili.com/x/player/playurl?avid=${aid}&cid=${cid}&fnval=16&fourk=1`;
+    const play = await fetchJson<PlayUrlResponse>(playUrl);
+    if (play.code !== 0 || !play.data) {
+      const msg = play.message || `code ${play.code}`;
+      if (/登录|login|会员|大会员/i.test(msg) || play.code === -101) {
+        throw new VideoMcpError(
+          `VIP or login required for media: ${msg}. Tip: install yt-dlp on PATH for better public downloads.`,
+          "VIP_OR_LOGIN",
+        );
+      }
+      throw new VideoMcpError(
+        `Playurl failed: ${msg}. Install yt-dlp on PATH and retry.`,
+        "DOWNLOAD_FAILED",
+      );
+    }
+
+    const audioUrl =
+      play.data.dash?.audio?.[0]?.baseUrl ||
+      play.data.dash?.audio?.[0]?.base_url;
+    const videoUrl =
+      play.data.dash?.video?.[0]?.baseUrl ||
+      play.data.dash?.video?.[0]?.base_url ||
+      play.data.durl?.[0]?.url;
+
+    if (audioUrl) {
+      const audioPath = path.join(destDir, "audio.m4s");
+      await downloadBinary(audioUrl, audioPath);
+      result.audioPath = audioPath;
+    }
+    // 仅转写时如果没有独立音轨，才下载可能含音频的视频流。
+    if (videoUrl && (needVideo || (needAudio && !audioUrl))) {
+      const videoPath = path.join(destDir, "video.m4s");
+      await downloadBinary(videoUrl, videoPath);
+      result.videoPath = videoPath;
+    }
+
+    if (!result.audioPath && !result.videoPath && !result.subtitleText) {
+      throw new VideoMcpError(
+        "No media or subtitles available. Install yt-dlp or try a video with public CC subtitles.",
+        "DOWNLOAD_FAILED",
+      );
+    }
+
+    return result;
+  }
+}
+
+async function downloadBinary(url: string, dest: string): Promise<void> {
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": bilibiliUserAgent(),
+      Referer: "https://www.bilibili.com/",
+    },
+  });
+  if (!res.ok) {
+    throw new VideoMcpError(
+      `Failed to download media (${res.status})`,
+      "DOWNLOAD_FAILED",
+    );
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  await fs.writeFile(dest, buf);
+}
+
+/** Convert Bilibili BCC JSON (or plain text) to readable transcript */
+export function subtitleJsonToText(body: string): string {
+  try {
+    const parsed = JSON.parse(body) as {
+      body?: Array<{ from?: number; to?: number; content?: string }>;
+    };
+    if (Array.isArray(parsed.body)) {
+      return parsed.body
+        .map((line) => (line.content ?? "").trim())
+        .filter(Boolean)
+        .join("\n");
+    }
+  } catch {
+    // not JSON
+  }
+  return body;
+}
