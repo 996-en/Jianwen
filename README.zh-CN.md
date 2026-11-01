@@ -51,6 +51,8 @@ npm test
 2. **下载模型：**从上述模型库获取多语言版 `ggml-large-v3-turbo.bin`（约 1.6 GB），放到 `Release/models/ggml-large-v3-turbo.bin`；也可使用其他支持中文的**多语言** GGML 模型并按实际文件名配置。只有 `.en` 后缀的英语模型不适合中文视频。可以从 whisper.cpp 源码目录使用其 [Windows 模型下载脚本](https://github.com/ggml-org/whisper.cpp/blob/master/models/download-ggml-model.cmd)：在 PowerShell 中运行 `& .\models\download-ggml-model.cmd large-v3-turbo`，下载后将模型放到所需位置。
 3. **配置路径并重启客户端：**设置 `VIDEO_MCP_ASR_PROVIDER=whisper_local`、`VIDEO_MCP_WHISPER_BIN=<whisper-cli 完整路径>`、`VIDEO_MCP_WHISPER_MODEL=<模型完整路径>`；下方有 MCP 客户端 `env` 示例。确认 ffmpeg 在 `PATH` 中，然后对没有平台字幕的视频调用 `fetch_assets`，传 `wantAsr: true`（想只要文字可同时传 `wantKeyframes: false`）。
 
+**Windows x64 打包下载：**[夸克网盘分享](https://pan.quark.cn/s/3f1f83689bec?pwd=CSxJ)，提取码 `CSxJ`。网盘中有 `models/`、`whisper-cpu-windows-x64/` 和 `whisper-cuda13.2-rtx20-50-windows-x64/`；按需下载并放到项目的 `Release/` 下，保持目录结构不变（程序选 CPU 或 CUDA 其一，模型需单独下载）。网盘提供的是 Whisper 程序和模型，**不包含本项目源码或 npm 依赖**。
+
 本机曾准备过 Windows x64 的 CPU 版及 CUDA 13.2 GPU 版；详见 [`Release/README.md`](Release/README.md)。**这些二进制及模型被 Git 忽略，克隆源码不会附带**；若未自行下载／单独提供，请将上面的路径改为你实际安装的位置。CUDA 包编译了 SM 75／86／89／120（RTX 20／30／40／50 架构），仅 RTX 5060 Ti 做过实机验证；需兼容驱动、足够显存和 Microsoft Visual C++ 运行库。附带所需 CUDA DLL 的打包版本无需在使用者电脑上安装 CUDA Toolkit。GTX 10、macOS、Linux、Windows ARM64 应选择适用的其他构建；**服务不会自动探测硬件并切换 CPU/GPU 版本**。分发二进制／模型时请遵守各自许可。
 
 ## 接入 MCP 客户端

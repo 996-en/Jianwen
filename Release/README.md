@@ -1,5 +1,7 @@
 # Windows 本地语音转写文件说明
 
+**打包文件下载：**[夸克网盘分享](https://pan.quark.cn/s/3f1f83689bec?pwd=CSxJ)，提取码：`CSxJ`。这是 Windows x64 的本地 Whisper 程序及模型包，**不包含本项目的 MCP 源码或 Node.js 依赖**。下载后把下面三个文件夹放入项目的 `Release/` 目录，保持目录名不变；按自己的硬件选择 CPU 或 CUDA 程序，模型两个版本共用。源码仓库的 Git 忽略规则不包含这些二进制和模型，需单独下载。
+
 目录结构：
 
 - `whisper-cpu-windows-x64/`：Windows x64 的 CPU 版 whisper.cpp（原 `backup-cpu`，不是废弃文件）。
