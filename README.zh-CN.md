@@ -43,7 +43,15 @@ npm test
 
 `npm ci` 会触发项目的 `prepare` 构建；显式执行 `npm run build` 便于单独检查 TypeScript。入口是 `node dist/index.js`，这是 **stdio MCP 服务**，不是浏览器打开的 HTTP 网站。
 
-**Windows whisper.cpp 二进制：** [`Release/README.md`](Release/README.md) 说明本机准备过的 Windows x64 CPU／CUDA 13.2 GPU 版本和运行依赖。`Release/` 的二进制与约 1.6 GB 模型**不进入版本库**；只下载项目源码时不会自动得到它们，请另行从 [whisper.cpp releases](https://github.com/ggerganov/whisper.cpp/releases) 和 [模型库](https://huggingface.co/ggerganov/whisper.cpp) 获取，或在遵守许可的前提下单独分发。准备的 CUDA 包编译了 SM 75／86／89／120（对应 RTX 20／30／40／50 架构），只在 RTX 5060 Ti 实测过；还需要兼容驱动、足够显存和 Microsoft Visual C++ 运行库。随包附带所需 CUDA DLL 时，使用者不必安装 CUDA Toolkit。GTX 10、macOS、Linux、Windows ARM64 应选择各自适用的构建；**服务不会自动探测硬件并切换 CPU/GPU 版本**。
+### 获取并配置 Whisper（只有本地 ASR 才需要）
+
+上游仓库是 **[ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp)**，程序下载见 [Releases](https://github.com/ggml-org/whisper.cpp/releases)，GGML 格式模型见 [ggerganov/whisper.cpp 模型库](https://huggingface.co/ggerganov/whisper.cpp)。**Whisper 程序和模型是两个独立的文件**：本项目的 `npm ci` 不会安装它们，云端 ASR 或不使用 ASR 时也不需要它们。
+
+1. **选程序：**Windows x64 可从 Releases 下载适合自己电脑的 CPU 版压缩包，解压后将 `whisper-cli.exe` **连同同包 DLL** 放在同一目录，例如 `Release/whisper-cpu-windows-x64/`。使用 NVIDIA GPU 时，需要针对自己显卡架构构建／取得匹配的 CUDA 版本；不要以为任意标注“CUDA”的包都通用。其他系统需获取对应的 whisper.cpp 可执行文件。上游也提供源码和编译说明，不想使用预编译包时可参考[上游 README](https://github.com/ggml-org/whisper.cpp#readme)自行构建。
+2. **下载模型：**从上述模型库获取多语言版 `ggml-large-v3-turbo.bin`（约 1.6 GB），放到 `Release/models/ggml-large-v3-turbo.bin`；也可使用其他支持中文的**多语言** GGML 模型并按实际文件名配置。只有 `.en` 后缀的英语模型不适合中文视频。可以从 whisper.cpp 源码目录使用其 [Windows 模型下载脚本](https://github.com/ggml-org/whisper.cpp/blob/master/models/download-ggml-model.cmd)：在 PowerShell 中运行 `& .\models\download-ggml-model.cmd large-v3-turbo`，下载后将模型放到所需位置。
+3. **配置路径并重启客户端：**设置 `VIDEO_MCP_ASR_PROVIDER=whisper_local`、`VIDEO_MCP_WHISPER_BIN=<whisper-cli 完整路径>`、`VIDEO_MCP_WHISPER_MODEL=<模型完整路径>`；下方有 MCP 客户端 `env` 示例。确认 ffmpeg 在 `PATH` 中，然后对没有平台字幕的视频调用 `fetch_assets`，传 `wantAsr: true`（想只要文字可同时传 `wantKeyframes: false`）。
+
+本机曾准备过 Windows x64 的 CPU 版及 CUDA 13.2 GPU 版；详见 [`Release/README.md`](Release/README.md)。**这些二进制及模型被 Git 忽略，克隆源码不会附带**；若未自行下载／单独提供，请将上面的路径改为你实际安装的位置。CUDA 包编译了 SM 75／86／89／120（RTX 20／30／40／50 架构），仅 RTX 5060 Ti 做过实机验证；需兼容驱动、足够显存和 Microsoft Visual C++ 运行库。附带所需 CUDA DLL 的打包版本无需在使用者电脑上安装 CUDA Toolkit。GTX 10、macOS、Linux、Windows ARM64 应选择适用的其他构建；**服务不会自动探测硬件并切换 CPU/GPU 版本**。分发二进制／模型时请遵守各自许可。
 
 ## 接入 MCP 客户端
 
