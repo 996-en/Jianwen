@@ -274,7 +274,7 @@ export class BilibiliAdapter implements PlatformAdapter {
       }
     }
 
-    if (options?.wantKeyframes !== false && cid) {
+    if (options?.wantKeyframes === true && cid) {
       try {
         result.keyframePaths = await fetchStoryboardFrames(
           ref,
@@ -286,7 +286,7 @@ export class BilibiliAdapter implements PlatformAdapter {
       }
     }
 
-    const needVideo = options?.wantKeyframes !== false && !result.keyframePaths?.length;
+    const needVideo = options?.wantKeyframes === true && !result.keyframePaths?.length;
     const needAudio = options?.wantAsr === true && !result.subtitleText;
     if (!needVideo && !needAudio) return result;
 

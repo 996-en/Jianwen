@@ -59,6 +59,7 @@ export class VideoMcpError extends Error {
       | "UNSUPPORTED_URL"
       | "NOT_FOUND"
       | "VIP_OR_LOGIN"
+      | "COOKIE_REQUIRED"
       | "DOWNLOAD_FAILED"
       | "FFMPEG_MISSING"
       | "ASR_UNAVAILABLE"

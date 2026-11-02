@@ -14,7 +14,7 @@
 2. GTX 10 系、无合适 NVIDIA 显卡或不满足 CUDA 条件的 Windows x64 电脑：选 CPU 版。CPU 版通常无需 NVIDIA 显卡，但依赖系统上的 Microsoft Visual C++ 运行库。
 3. macOS、Linux、Windows ARM64：这里的 Windows x64 可执行文件不适用，需获取适配目标系统的 whisper.cpp 版本。仅凭“有 NVIDIA 显卡”不足以判断此 CUDA 包可用。
 
-本 MCP **不会自动检测硬件切换版本**；选择后需设置以下环境变量，并重启 MCP 客户端：
+本 MCP 会自动探测本目录：找到 `whisper-*/whisper-cli.exe` 与 `models/ggml-*.bin` 就默认启用本地转写（有 NVIDIA 显卡时优先 CUDA 版，否则 CPU 版）。只有想指定其他程序/模型时才需要设置环境变量，且环境变量始终优先：
 
 ```text
 VIDEO_MCP_ASR_PROVIDER=whisper_local

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { getAsrProvider } from "../config.js";
+import { getAsrProvider, keepDownloadedMedia, whisperBin, whisperLanguage, whisperModel } from "../config.js";
 import type { CacheStore } from "../cache/store.js";
 import type { PlatformAdapter } from "../adapters/types.js";
 import {
@@ -141,11 +141,11 @@ async function runAsr(
   if (provider === "none") return null;
 
   if (provider === "whisper_local") {
-    const whisper = process.env.VIDEO_MCP_WHISPER_BIN?.trim() || "whisper-cli";
-    const model = process.env.VIDEO_MCP_WHISPER_MODEL?.trim();
+    const whisper = whisperBin();
+    const model = whisperModel();
     if (!model) {
       throw new VideoMcpError(
-        "Local ASR requires VIDEO_MCP_WHISPER_MODEL (path to a multilingual ggml-*.bin model).",
+        "Local ASR needs a whisper.cpp model: put ggml-*.bin in Release/models/ or set VIDEO_MCP_WHISPER_MODEL.",
         "ASR_UNAVAILABLE",
       );
     }
@@ -155,7 +155,7 @@ async function runAsr(
       await run(whisper, [
         "-m", model,
         "-f", audioPath,
-        "-l", process.env.VIDEO_MCP_WHISPER_LANGUAGE?.trim() || "auto",
+        "-l", whisperLanguage(),
         "-otxt",
         "-of", outBase,
       ], { timeoutMs: timeoutSec * 1000, signal });
@@ -164,7 +164,7 @@ async function runAsr(
       return { text, path: txtPath };
     } catch (err) {
       throw new VideoMcpError(
-        `Local whisper ASR failed (${whisper}). Set VIDEO_MCP_WHISPER_BIN or install whisper.cpp. ${
+        `Local whisper ASR failed (${whisper}). Set VIDEO_MCP_WHISPER_BIN, or drop whisper.cpp into Release/. ${
           err instanceof Error ? err.message : String(err)
         }`,
         "ASR_UNAVAILABLE",
@@ -218,9 +218,12 @@ export async function fetchAssets(
   context: { signal?: AbortSignal; onProgress?: (stage: string) => void } = {},
 ): Promise<AssetManifest> {
   const wantSubtitles = options.wantSubtitles !== false;
-  const wantAsr = options.wantAsr === true;
-  const asrEnabled = wantAsr && getAsrProvider() !== "none";
-  const wantKeyframes = options.wantKeyframes !== false;
+  const provider = getAsrProvider();
+  // ASR 默认开启：只要配置了 provider 且调用方没显式 wantAsr:false 就转写。
+  // 平台带字幕时会在下面自动跳过，不会白跑一遍转写。
+  const asrEnabled = options.wantAsr !== false && provider !== "none";
+  // 关键帧默认不取：只要文字时不必下载整段视频（抖音尤其明显）。
+  const wantKeyframes = options.wantKeyframes === true;
   const interval = options.keyframeIntervalSec ?? 10;
 
   const destDir = await cache.ensureDir(ref);
@@ -255,11 +258,15 @@ export async function fetchAssets(
   let asrText: string | undefined;
   let asrPath: string | undefined;
 
-  if (wantAsr && subtitleText) {
+  if (asrEnabled && subtitleText) {
     notes.push("ASR skipped because platform subtitles were available.");
-  } else if (wantAsr && !asrEnabled) {
+  } else if (!asrEnabled && options.wantAsr === true) {
     notes.push("ASR skipped: VIDEO_MCP_ASR_PROVIDER is none. Set whisper_local or openai_compatible.");
-  } else if (asrEnabled) {
+  } else if (!asrEnabled && !subtitleText) {
+    notes.push(
+      "No platform subtitles; set VIDEO_MCP_ASR_PROVIDER=whisper_local (or openai_compatible) to transcribe the audio.",
+    );
+  } else if (asrEnabled && !subtitleText) {
     const source = audioPath ?? videoPath;
     if (!source) {
       notes.push("ASR requested but no audio available.");
@@ -267,17 +274,25 @@ export async function fetchAssets(
       if (!(await ffmpegAvailable())) {
         throw new VideoMcpError("ffmpeg is required to convert audio for ASR.", "FFMPEG_MISSING");
       }
-      const localAsr = getAsrProvider() === "whisper_local";
+      const localAsr = provider === "whisper_local";
       const timeoutSec = options.asrTimeoutSec ?? estimateAsrTimeoutSec(ref.durationSec);
       if (localAsr && (!Number.isInteger(timeoutSec) || timeoutSec < 30 || timeoutSec > 86400)) {
         throw new VideoMcpError("asrTimeoutSec must be an integer from 30 to 86400 seconds.", "ASR_UNAVAILABLE");
       }
       const wav = path.join(destDir, "audio_16k.wav");
-      context.onProgress?.("正在将音频转换为 16 kHz WAV");
-      await extractAudioWav(source, wav, context.signal);
-      audioPath = wav;
+      let wavPath: string;
+      if (media.audioReady && audioPath) {
+        // 适配器已经流式抽好 16 kHz 单声道 WAV（例如抖音 fast-audio），不必再转一次。
+        wavPath = audioPath;
+        notes.push("ASR used the streamed audio track; no full video was downloaded.");
+      } else {
+        context.onProgress?.("正在将音频转换为 16 kHz WAV");
+        await extractAudioWav(source, wav, context.signal);
+        wavPath = wav;
+        audioPath = wav;
+      }
       context.onProgress?.(localAsr ? `正在使用 Whisper 转写（最长 ${timeoutSec} 秒）` : "正在请求云端 ASR 转写");
-      const asr = await runAsr(wav, destDir, timeoutSec, context.signal);
+      const asr = await runAsr(wavPath, destDir, timeoutSec, context.signal);
       if (asr) {
         asrText = asr.text;
         asrPath = asr.path;
@@ -312,6 +327,27 @@ export async function fetchAssets(
           }`,
         );
       }
+    }
+  }
+
+  // 整段视频只在抽帧/转写时当临时文件用；用完默认删掉，避免缓存里躺着几百 MB 的 mp4。
+  // 只删本平台自己下载到缓存目录内的文件，平台自带的路径（例如故事板）一律不动。
+  if (
+    videoPath &&
+    !keepDownloadedMedia() &&
+    (keyframePaths?.length || asrText) &&
+    path.resolve(videoPath).startsWith(`${path.resolve(destDir)}${path.sep}`)
+  ) {
+    try {
+      await fs.rm(videoPath, { force: true });
+      videoPath = undefined;
+      notes.push(
+        "Removed the downloaded video after extraction (set VIDEO_MCP_KEEP_MEDIA=1 to keep it).",
+      );
+    } catch (err) {
+      notes.push(
+        `Could not remove the downloaded video: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 

@@ -67,10 +67,10 @@ const server = new McpServer({
 
 server.tool(
   "resolve_video",
-  "Resolve a Bilibili URL or BV/av id into a VideoRef (title, duration, author, publishedAt and engagement stats snapshot).",
+  "Resolve a Bilibili or Douyin video into a VideoRef (title, duration, author, publishedAt and engagement stats snapshot). Douyin requires browser guest cookies via VIDEO_MCP_DOUYIN_COOKIE_FILE or VIDEO_MCP_DOUYIN_COOKIES.",
   {
-    url: z.string().optional().describe("Bilibili watch URL or b23.tv short link"),
-    id: z.string().optional().describe("BV id (e.g. BV1xx...) or av number"),
+    url: z.string().optional().describe("Bilibili watch URL, b23.tv short link, Douyin video URL or v.douyin.com share link"),
+    id: z.string().optional().describe("BV id (e.g. BV1xx...), av number, or Douyin aweme id"),
   },
   async ({ url, id }) => {
     try {
@@ -84,16 +84,18 @@ server.tool(
 
 server.tool(
   "fetch_assets",
-  "Cache subtitles, optional ASR and up to 6 storyboard frames; fall back to video download + ffmpeg if storyboard is unavailable. Local ASR timeout is estimated from durationSec or overridden with asrTimeoutSec; long operations report progress. Returns local paths.",
+  "Cache subtitles, optional ASR and up to 6 storyboard frames; fall back to video download + ffmpeg if storyboard is unavailable. Local ASR timeout is estimated from durationSec or overridden with asrTimeoutSec; long operations report progress. Returns local paths. Bilibili exposes subtitles and a storyboard; Douyin has neither, so Douyin always downloads the video for ASR/frames.",
   {
     url: z.string().optional(),
     id: z.string().optional(),
     ref: videoRefSchema.optional(),
     wantSubtitles: z.boolean().optional().default(true),
-    wantAsr: z.boolean().optional().default(false),
+    wantAsr: z.boolean().optional()
+      .describe("Transcribe the audio with ASR. Defaults to on when VIDEO_MCP_ASR_PROVIDER is configured (and is skipped automatically when the platform already has subtitles); set false to force it off."),
     asrTimeoutSec: z.number().int().min(30).max(86400).optional()
       .describe("Optional Whisper process timeout in seconds; defaults to durationSec * 3 + 120 (min 300, max 86400). Does not change the MCP client's timeout."),
-    wantKeyframes: z.boolean().optional().default(true),
+    wantKeyframes: z.boolean().optional().default(false)
+      .describe("Extract representative frames. Defaults to false: without it only text (platform subtitles or ASR) is collected, which avoids downloading the whole video on Douyin. Set true when you need to see the picture."),
     keyframeIntervalSec: z.number().optional().default(10),
   },
   async (args, extra) => {
@@ -119,7 +121,7 @@ server.tool(
         id: args.id,
         ref: args.ref as VideoRef | undefined,
       });
-      if (args.wantAsr && getAsrProvider() === "whisper_local") {
+      if (args.wantAsr !== false && getAsrProvider() === "whisper_local") {
         stage = `视频时长 ${ref.durationSec} 秒；Whisper 最长 ${args.asrTimeoutSec ?? estimateAsrTimeoutSec(ref.durationSec)} 秒`;
         reportProgress();
       }
@@ -211,7 +213,6 @@ server.tool(
         const adapter = adapterByPlatform(ref.platform);
         manifest = await fetchAssets(adapter, ref, cache, {
           wantSubtitles: true,
-          wantAsr: false,
           wantKeyframes: true,
         });
       }

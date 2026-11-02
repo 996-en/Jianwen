@@ -7,5 +7,9 @@ Release/*
 !Release/README.md
 *.log
 .env
+# 浏览器 Cookie 导出文件，禁止入库
+*cookies*.txt
+cookies.txt
 .DS_Store
 coverage/
+.playwright-mcp/

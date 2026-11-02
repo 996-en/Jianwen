@@ -9,7 +9,7 @@ import {
   extractBvId,
   isBilibiliInput,
   subtitleJsonToText,
-} from "./bilibili.js";
+} from "../../src/adapters/bilibili.js";
 
 describe("bilibili parsing", () => {
   it("extracts BV from bare id", () => {

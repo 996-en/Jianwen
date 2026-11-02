@@ -1,7 +1,7 @@
 {
   "name": "jianwen",
   "version": "0.1.0",
-  "description": "Jianwen (见闻): local MCP server that turns media from online platforms (Bilibili today) into model-readable context - metadata, subtitles, ASR and keyframes",
+  "description": "Jianwen (见闻): local MCP server that turns media from online platforms (Bilibili, Douyin) into model-readable context - metadata, subtitles, ASR and keyframes",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -11,7 +11,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc --watch",
-    "test": "node --import tsx --test src/**/*.test.ts",
+    "test": "tsc -p tsconfig.test.json && node --import tsx --test \"tests/**/*.test.ts\"",
+    "douyin:cookies": "node scripts/douyin-cookies.mjs",
     "prepare": "npm run build"
   },
   "engines": {
@@ -20,6 +21,8 @@
   "keywords": [
     "mcp",
     "bilibili",
+    "douyin",
+    "tiktok",
     "video",
     "media",
     "subtitle",

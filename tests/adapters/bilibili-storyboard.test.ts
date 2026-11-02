@@ -4,9 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import sharp from "sharp";
-import { BilibiliAdapter } from "./bilibili.js";
-import { fetchStoryboardFrames } from "./bilibili-storyboard.js";
-import type { VideoRef } from "../types.js";
+import { BilibiliAdapter } from "../../src/adapters/bilibili.js";
+import { fetchStoryboardFrames } from "../../src/adapters/bilibili-storyboard.js";
+import type { VideoRef } from "../../src/types.js";
 
 const ref: VideoRef = {
   platform: "bilibili", id: "BV1GJ411x7h7", title: "测试", durationSec: 50,
