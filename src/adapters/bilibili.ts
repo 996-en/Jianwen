@@ -55,13 +55,41 @@ async function fetchJson<T>(url: string): Promise<T> {
   return JSON.parse(text) as T;
 }
 
-async function resolveShortLink(url: string): Promise<string> {
-  const res = await fetch(url, {
+/** 从输入（可能是整段分享文案）里取出 b23.tv 短链，补全 scheme */
+export function extractShortLink(input: string): string | null {
+  const m = input.match(B23_RE);
+  if (!m) return null;
+  return /^https?:\/\//i.test(m[0]) ? m[0] : `https://${m[0]}`;
+}
+
+/**
+ * 跟随 b23.tv 短链到最终地址。先 manual 逐跳读 Location（分享文案跳转经常不止一跳），
+ * 中途解析到 BV/av 就提前返回；拿不到 Location 的环节退回 follow 后取最终 URL。
+ */
+async function resolveShortLink(url: string): Promise<{ url: string; status: number }> {
+  let current = url;
+  let status = 0;
+  for (let hop = 0; hop < 5; hop += 1) {
+    const res = await fetch(current, {
+      method: "GET",
+      redirect: "manual",
+      headers: { "User-Agent": bilibiliUserAgent() },
+    });
+    status = res.status;
+    const location = res.headers.get("location");
+    if (!location) break;
+    current = new URL(location, current).toString();
+    if (BV_RE.test(current) || AV_RE.test(current)) return { url: current, status };
+  }
+  if (BV_RE.test(current) || AV_RE.test(current)) return { url: current, status };
+
+  // 有些网络环境下 redirect: manual 拿不到 Location，退回跟随重定向后解析最终 URL。
+  const followed = await fetch(url, {
     method: "GET",
     redirect: "follow",
     headers: { "User-Agent": bilibiliUserAgent() },
   });
-  return res.url;
+  return { url: followed.url, status: followed.status };
 }
 
 function commandExists(cmd: string): Promise<boolean> {
@@ -161,9 +189,22 @@ export class BilibiliAdapter implements PlatformAdapter {
 
   async resolve(input: string): Promise<VideoRef> {
     let raw = input.trim();
-    if (B23_RE.test(raw)) {
-      if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
-      raw = await resolveShortLink(raw);
+    let shortLink: string | undefined;
+    let shortStatus: number | undefined;
+    const shortTarget = extractShortLink(raw);
+    if (shortTarget) {
+      shortLink = shortTarget;
+      try {
+        const followed = await resolveShortLink(shortTarget);
+        raw = followed.url;
+        shortStatus = followed.status;
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        throw new VideoMcpError(
+          `Could not follow Bilibili short link ${shortLink}: ${reason}`,
+          "UNSUPPORTED_URL",
+        );
+      }
     }
 
     let bvid = extractBvId(raw);
@@ -176,7 +217,11 @@ export class BilibiliAdapter implements PlatformAdapter {
       apiUrl = `https://api.bilibili.com/x/web-interface/view?aid=${encodeURIComponent(avid)}`;
     } else {
       throw new VideoMcpError(
-        `Could not parse a Bilibili BV/av id from: ${input}`,
+        shortLink === undefined
+          ? `Could not parse a Bilibili BV/av id from: ${input}`
+          : raw === shortLink
+            ? `Bilibili short link ${shortLink} did not redirect to a video page (HTTP ${shortStatus ?? 0}, no BV/av id to resolve).`
+            : `Bilibili short link ${shortLink} led to ${raw}, which is not a video page (HTTP ${shortStatus ?? 0}, no BV/av id to resolve).`,
         "UNSUPPORTED_URL",
       );
     }

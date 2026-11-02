@@ -98,6 +98,111 @@ describe("BilibiliAdapter.resolve", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("短链跳转失败时报错说明是短链问题，而不是“解析不到 BV”", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input) => {
+      assert.equal(String(input), "https://b23.tv/abcdefg");
+      throw new TypeError("fetch failed");
+    };
+    try {
+      await assert.rejects(
+        () => new BilibiliAdapter().resolve("https://b23.tv/abcdefg"),
+        (err: unknown) => {
+          assert.ok(err instanceof Error);
+          assert.equal((err as { code?: string }).code, "UNSUPPORTED_URL");
+          assert.match(err.message, /short link https:\/\/b23\.tv\/abcdefg/);
+          assert.match(err.message, /fetch failed/);
+          return true;
+        },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("短链跳到非作品页时报出最终地址", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      ({
+        url: "https://www.bilibili.com/blackboard/activity.html",
+        headers: new Headers(),
+        status: 200,
+      }) as unknown as Response;
+    try {
+      await assert.rejects(
+        () => new BilibiliAdapter().resolve("b23.tv/abcdefg"),
+        (err: unknown) => {
+          assert.ok(err instanceof Error);
+          assert.equal((err as { code?: string }).code, "UNSUPPORTED_URL");
+          assert.match(err.message, /led to https:\/\/www\.bilibili\.com\/blackboard/);
+          assert.match(err.message, /not a video page/);
+          return true;
+        },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("分享文案里的短链只请求链接本身，不拿整段文字当 URL", async () => {
+    const originalFetch = globalThis.fetch;
+    const requested: string[] = [];
+    globalThis.fetch = async (input) => {
+      const url = String(input);
+      requested.push(url);
+      if (url.startsWith("https://b23.tv/")) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://www.bilibili.com/video/BV1VqsQ6KEoy?share_source=copy_web" },
+        });
+      }
+      return Response.json({
+        code: 0, message: "0", data: {
+          bvid: "BV1VqsQ6KEoy", aid: 123, title: "测试视频", duration: 116,
+          owner: { name: "UP" }, pages: [{ cid: 456, duration: 116 }],
+        },
+      });
+    };
+    try {
+      const ref = await new BilibiliAdapter().resolve(
+        "【影视飓风】某标题 https://b23.tv/abcdefg 分享自B站",
+      );
+      assert.equal(ref.id, "BV1VqsQ6KEoy");
+      assert.equal(ref.pageUrl, "https://www.bilibili.com/video/BV1VqsQ6KEoy");
+      assert.deepEqual(requested, [
+        "https://b23.tv/abcdefg",
+        "https://api.bilibili.com/x/web-interface/view?bvid=BV1VqsQ6KEoy",
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("短链 Location 是相对地址时能拼成绝对地址", async () => {
+    const originalFetch = globalThis.fetch;
+    const requested: string[] = [];
+    globalThis.fetch = async (input) => {
+      const url = String(input);
+      requested.push(url);
+      if (url.startsWith("https://b23.tv/")) {
+        return new Response(null, { status: 302, headers: { location: "/video/BV1VqsQ6KEoy" } });
+      }
+      return Response.json({
+        code: 0, message: "0", data: {
+          bvid: "BV1VqsQ6KEoy", aid: 123, title: "测试视频", duration: 116,
+          owner: { name: "UP" }, pages: [{ cid: 456, duration: 116 }],
+        },
+      });
+    };
+    try {
+      const ref = await new BilibiliAdapter().resolve("https://b23.tv/relative1");
+      assert.equal(ref.id, "BV1VqsQ6KEoy");
+      assert.equal(requested[0], "https://b23.tv/relative1");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe("BilibiliAdapter.fetchMedia", () => {
