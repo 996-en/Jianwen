@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { getAsrProvider, keepDownloadedMedia, whisperBin, whisperLanguage, whisperModel } from "../config.js";
+import { getAsrProvider, keepDownloadedMedia, whisperBin, whisperLanguage, whisperModel, whisperVadModel } from "../config.js";
 import type { CacheStore } from "../cache/store.js";
 import type { PlatformAdapter } from "../adapters/types.js";
+import { formatAsrSegments, parseWhisperJson } from "./asr-text.js";
 import {
   VideoMcpError,
   type AssetManifest,
@@ -131,6 +132,32 @@ async function extractAudioWav(
   ], { signal });
 }
 
+/**
+ * 组装 whisper-cli 参数，单独导出便于测试。
+ * -mc 0：不携带上一窗口的文本，否则连续 BGM 下容易复读同一句并吞掉真实语音；
+ *         代价是不再输出标点，由 asr-text 后处理补段落。
+ * --vad：先做语音活动检测，纯音乐/静音段直接跳过，从源头掐掉复读与幻觉。
+ */
+export function whisperCliArgs(opts: {
+  model: string;
+  audioPath: string;
+  outBase: string;
+  language: string;
+  vadModel?: string;
+}): string[] {
+  const args = [
+    "-m", opts.model,
+    "-f", opts.audioPath,
+    "-l", opts.language,
+    "-mc", "0",
+    // 抑制 (音乐) 一类非语音标记。
+    "-sns",
+  ];
+  if (opts.vadModel) args.push("--vad", "-vm", opts.vadModel);
+  args.push("-oj", "-of", opts.outBase);
+  return args;
+}
+
 async function runAsr(
   audioPath: string,
   destDir: string,
@@ -150,21 +177,24 @@ async function runAsr(
       );
     }
     const outBase = path.join(destDir, "asr");
+    const vadModel = whisperVadModel();
     try {
       await fs.access(model);
-      await run(whisper, [
-        "-m", model,
-        "-f", audioPath,
-        "-l", whisperLanguage(),
-        "-otxt",
-        "-of", outBase,
-      ], { timeoutMs: timeoutSec * 1000, signal });
+      if (vadModel) await fs.access(vadModel);
+      await run(
+        whisper,
+        whisperCliArgs({ model, audioPath, outBase, language: whisperLanguage(), vadModel }),
+        { timeoutMs: timeoutSec * 1000, signal },
+      );
+      const jsonPath = `${outBase}.json`;
+      const { language, segments } = parseWhisperJson(await fs.readFile(jsonPath, "utf8"));
+      const text = formatAsrSegments(segments, language ?? whisperLanguage());
       const txtPath = `${outBase}.txt`;
-      const text = await fs.readFile(txtPath, "utf8");
+      await fs.writeFile(txtPath, text ? `${text}\n` : "", "utf8");
       return { text, path: txtPath };
     } catch (err) {
       throw new VideoMcpError(
-        `Local whisper ASR failed (${whisper}). Set VIDEO_MCP_WHISPER_BIN, or drop whisper.cpp into Release/. ${
+        `Local whisper ASR failed (${whisper}). Set VIDEO_MCP_WHISPER_BIN / VIDEO_MCP_WHISPER_VAD_MODEL, or drop whisper.cpp into Release/. ${
           err instanceof Error ? err.message : String(err)
         }`,
         "ASR_UNAVAILABLE",

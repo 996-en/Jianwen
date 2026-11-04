@@ -7,6 +7,7 @@
 - `whisper-cpu-windows-x64/`：Windows x64 的 CPU 版 whisper.cpp（原 `backup-cpu`，不是废弃文件）。
 - `whisper-cuda13.2-rtx20-50-windows-x64/`：Windows x64 的 NVIDIA CUDA 13.2 GPU 版，编入 SM 75、86、89、120，面向对应架构的 RTX 20／30／40／50 系显卡。
 - `models/ggml-large-v3-turbo.bin`：两个版本共用的多语言模型，不必重复复制。
+- `models/ggml-silero-v6.2.0.bin`：可选的 Silero VAD 模型（约 900 KB），来源 [ggml-org/whisper-vad](https://huggingface.co/ggml-org/whisper-vad)。放进去即启用：转写前先切掉纯音乐／静音段，可减少 whisper 的复读和幻觉；不放也不影响转写，只是不启用 VAD。
 
 ## 让 AI / 使用者选择
 
@@ -21,6 +22,8 @@ VIDEO_MCP_ASR_PROVIDER=whisper_local
 VIDEO_MCP_WHISPER_BIN=<Release 的完整路径>\whisper-cpu-windows-x64\whisper-cli.exe
 VIDEO_MCP_WHISPER_MODEL=<Release 的完整路径>\models\ggml-large-v3-turbo.bin
 ```
+
+`models/` 下存在 `ggml-silero-*.bin` 时会自动启用 VAD（有多个时取版本号最新的），不需要为它设任何环境变量；想指定别的 VAD 模型用 `VIDEO_MCP_WHISPER_VAD_MODEL`，设成 `0` 可关闭。
 
 如符合 CUDA 版条件，将 `VIDEO_MCP_WHISPER_BIN` 指向 `whisper-cuda13.2-rtx20-50-windows-x64\whisper-cli.exe`。该目录已随程序附带 CUDA 13.2 运行库 `cublas64_13.dll`、`cublasLt64_13.dll`、`cudart64_13.dll`，**无须另外安装 CUDA Toolkit 或设置其 `PATH`**；仍需兼容的 NVIDIA 驱动、Windows x64、足够显存及 Microsoft Visual C++ 运行库。本机已在不包含 CUDA Toolkit 的 `PATH` 下用 RTX 5060 Ti 实测成功，但尚未在无 Toolkit 的干净电脑以及 RTX 20／30／40 系显卡上验证。
 

@@ -51,19 +51,45 @@ function pickWhisperModel(releaseDir: string): string | undefined {
   const modelsDir = path.join(releaseDir, "models");
   if (!existsSync(modelsDir)) return undefined;
   const files = readdirSync(modelsDir)
-    .filter((file) => file.startsWith("ggml-") && file.endsWith(".bin"))
+    .filter(
+      (file) =>
+        file.startsWith("ggml-") &&
+        file.endsWith(".bin") &&
+        // VAD 模型与语音模型放在同一目录，但它不是可转写的 whisper 模型
+        !file.startsWith("ggml-silero-"),
+    )
     .sort();
   const preferred = files.find((file) => file.includes("turbo")) ?? files[0];
   return preferred ? path.join(modelsDir, preferred) : undefined;
+}
+
+/** VAD 模型（silero），文件名形如 `ggml-silero-v6.2.0.bin`；按版本号从新到旧挑 */
+function pickVadModel(releaseDir: string): string | undefined {
+  const modelsDir = path.join(releaseDir, "models");
+  if (!existsSync(modelsDir)) return undefined;
+  const file = readdirSync(modelsDir)
+    .filter((name) => /^ggml-silero-.*\.bin$/.test(name))
+    .sort((a, b) => b.localeCompare(a, "en", { numeric: true }))[0];
+  return file ? path.join(modelsDir, file) : undefined;
+}
+
+export interface ReleaseWhisperPaths {
+  bin?: string;
+  model?: string;
+  vadModel?: string;
 }
 
 /**
  * 自动探测 `Release/` 下的打包版 whisper.cpp 与模型。
  * 有 NVIDIA 显卡时优先 CUDA 版，否则用 CPU 版；都没有就返回空，交给环境变量或 PATH。
  */
-export function detectReleaseWhisper(root: string = projectRoot): { bin?: string; model?: string } {
+export function detectReleaseWhisper(root: string = projectRoot): ReleaseWhisperPaths {
   const releaseDir = path.join(root, "Release");
-  return { bin: pickWhisperBin(releaseDir), model: pickWhisperModel(releaseDir) };
+  return {
+    bin: pickWhisperBin(releaseDir),
+    model: pickWhisperModel(releaseDir),
+    vadModel: pickVadModel(releaseDir),
+  };
 }
 
 /** whisper.cpp 可执行文件：环境变量 > Release/ 打包版 > PATH 上的 whisper-cli */
@@ -78,6 +104,23 @@ export function whisperModel(): string | undefined {
 
 export function whisperLanguage(): string {
   return process.env.VIDEO_MCP_WHISPER_LANGUAGE?.trim() || "auto";
+}
+
+/** 环境变量里表示“关闭”的常见写法 */
+function isOff(value: string): boolean {
+  const v = value.trim().toLowerCase();
+  return v === "0" || v === "false" || v === "no" || v === "off" || v === "none";
+}
+
+/**
+ * VAD 模型路径：`VIDEO_MCP_WHISPER_VAD_MODEL` 优先，设为 0/off/none 表示不用 VAD；
+ * 未设置时自动取 `Release/models/ggml-silero-*.bin`。
+ * 有 VAD 时 whisper 会先切掉纯音乐/静音段，避免在没有人声的地方复读或产生幻觉。
+ */
+export function whisperVadModel(): string | undefined {
+  const fromEnv = process.env.VIDEO_MCP_WHISPER_VAD_MODEL?.trim();
+  if (fromEnv) return isOff(fromEnv) ? undefined : fromEnv;
+  return detectReleaseWhisper().vadModel;
 }
 
 export function getAsrProvider(): AsrProvider {

@@ -23,6 +23,7 @@ The workflow is **resolve → fetch → analyze**: the client may analyze the re
 2. When requested, subtitles come from the player API. If subtitles are available, requesting ASR skips transcription. Many videos have no exposed subtitles.
 3. Keyframes first come from the videoshot storyboard: the server crops **up to six** tiles across the first 90% of the video without downloading the whole video. If unavailable, it downloads media and uses ffmpeg to sample frames; this fallback can produce more than six frames depending on the interval.
 4. When ASR is explicitly requested and no subtitle was found, it prefers an audio-only stream via `yt-dlp` (or Bilibili's playurl fallback), converts audio to mono 16 kHz WAV with ffmpeg, then runs local whisper.cpp or sends audio to an explicitly configured compatible ASR API. If an audio stream is unavailable, it may download video instead.
+5. Local whisper.cpp output is post-processed before it is written: Traditional Chinese is converted to Simplified with OpenCC, consecutive segments repeated by background music are collapsed, and segments are merged into paragraphs at pauses or at a character limit instead of one line per segment. The timestamped raw segments stay next to `asr.txt` as `asr.json`.
 
 Default `fetch_assets` options are `wantSubtitles: true`, `wantKeyframes: false`, and `keyframeIntervalSec: 10`, so an optionless call returns **text only** — platform subtitles, or a transcript — and never downloads a video just to sample it. `wantAsr` is **on by default whenever `VIDEO_MCP_ASR_PROVIDER` is configured** (it is skipped automatically when the platform already provides subtitles) and only an explicit `false` turns it off. Pass `wantKeyframes: true` when the model needs to see the picture; storyboard tiles are then cropped without downloading the video (Douyin has no storyboard, so it downloads the mp4), and after extraction or transcription that mp4 is deleted unless `VIDEO_MCP_KEEP_MEDIA=1`. Storyboard frames are thumbnails, not full-resolution frames; AI-generated interpretations and ASR text should be checked against the source.
 
@@ -93,6 +94,7 @@ src/                         production code; `npm run build` compiles only this
   pipeline/
     assets.ts                post-download work: ffmpeg → 16 kHz mono WAV, ASR (local whisper or
                              cloud API), keyframe extraction, manifest write-back
+    asr-text.ts              whisper.cpp JSON → Simplified Chinese, dedup, paragraph merge
 tests/                       tests mirroring src/; `npm test` runs these, never built into dist
   config.test.ts             default paths and env precedence (including the default Douyin cookie file)
   adapters/bilibili.test.ts  Bilibili parsing, metadata, subtitles, download (mocked fetch)
@@ -199,6 +201,7 @@ The historical `VIDEO_MCP_` prefix is retained for compatibility with older conf
 | `VIDEO_MCP_ASR_PROVIDER` | Unset means **auto**: `whisper_local` when a whisper binary and model are found under `Release/`, otherwise `none`. May also be set explicitly to `whisper_local`, `openai_compatible`, or `none`. Any non-`none` value makes `fetch_assets` transcribe automatically unless `wantAsr: false` is passed. |
 | `VIDEO_MCP_WHISPER_BIN` / `VIDEO_MCP_WHISPER_MODEL` | Local binary and model paths. Defaults are discovered: `Release/whisper-*/whisper-cli.exe` (CUDA build preferred when an NVIDIA GPU is available) and `Release/models/ggml-*.bin` (turbo preferred); `whisper-cli` on `PATH` is only used when neither exists. |
 | `VIDEO_MCP_WHISPER_LANGUAGE` | Whisper language; default `auto`, or e.g. `zh`. |
+| `VIDEO_MCP_WHISPER_VAD_MODEL` | Silero VAD model path; default is `Release/models/ggml-silero-*.bin` whenever one exists. VAD drops music-only/silent stretches before transcribing, which is where whisper tends to loop or hallucinate. Set to `0`/`off` to disable. |
 | `VIDEO_MCP_KEEP_MEDIA` | Set to `1` to keep the downloaded video after extraction (default: delete it, keeping only `keyframes/`, `audio_16k.wav`, etc.). |
 | `VIDEO_MCP_ASR_BASE_URL` / `VIDEO_MCP_ASR_API_KEY` / `VIDEO_MCP_ASR_MODEL` | Compatible speech-transcription API (`MODEL` defaults to `whisper-1`). **Audio is sent to this service.** |
 | `VIDEO_MCP_SUMMARY_BASE_URL` / `VIDEO_MCP_SUMMARY_API_KEY` / `VIDEO_MCP_SUMMARY_MODEL` | Compatible chat-completions API for `summarize`. **Text and available frame images may be sent to this service.** |

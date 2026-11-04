@@ -10,6 +10,7 @@ import {
   douyinFastAudio,
   getAsrProvider,
   projectRoot,
+  whisperVadModel,
 } from "../src/config.js";
 
 describe("config: 抖音 Cookie 路径", () => {
@@ -68,15 +69,53 @@ describe("config: 本地 whisper 自动探测", () => {
       // 有 NVIDIA 显卡时选 CUDA 版，否则回落 CPU 版；两者都是合法结果
       assert.ok(/whisper-(cuda|cpu)-test/.test(detected.bin!));
       assert.equal(path.basename(detected.model!), "ggml-large-v3-turbo.bin");
+      assert.equal(detected.vadModel, undefined);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("VAD 模型单独识别，不会被当成转写模型", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "whisper-vad-detect-"));
+    try {
+      const models = path.join(root, "Release", "models");
+      await fs.mkdir(models, { recursive: true });
+      await fs.writeFile(path.join(models, "ggml-small.bin"), "");
+      await fs.writeFile(path.join(models, "ggml-silero-v5.1.2.bin"), "");
+      await fs.writeFile(path.join(models, "ggml-silero-v6.2.0.bin"), "");
+
+      const detected = detectReleaseWhisper(root);
+      // 只有 silero 也在 models/ 里时，转写模型不能退回 VAD 模型
+      assert.equal(path.basename(detected.model!), "ggml-small.bin");
+      assert.equal(path.basename(detected.vadModel!), "ggml-silero-v6.2.0.bin");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("VIDEO_MCP_WHISPER_VAD_MODEL 可指定路径，也可关闭 VAD", () => {
+    const prev = process.env.VIDEO_MCP_WHISPER_VAD_MODEL;
+    try {
+      process.env.VIDEO_MCP_WHISPER_VAD_MODEL = "D:/custom/ggml-silero.bin";
+      assert.equal(whisperVadModel(), "D:/custom/ggml-silero.bin");
+      for (const off of ["0", "off", "none", "false", "NO"]) {
+        process.env.VIDEO_MCP_WHISPER_VAD_MODEL = off;
+        assert.equal(whisperVadModel(), undefined, off);
+      }
+    } finally {
+      if (prev === undefined) delete process.env.VIDEO_MCP_WHISPER_VAD_MODEL;
+      else process.env.VIDEO_MCP_WHISPER_VAD_MODEL = prev;
     }
   });
 
   it("Release/ 缺失时返回空，交给环境变量或 PATH", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "whisper-detect-empty-"));
     try {
-      assert.deepEqual(detectReleaseWhisper(root), { bin: undefined, model: undefined });
+      assert.deepEqual(detectReleaseWhisper(root), {
+        bin: undefined,
+        model: undefined,
+        vadModel: undefined,
+      });
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

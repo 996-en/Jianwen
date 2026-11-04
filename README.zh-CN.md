@@ -23,6 +23,7 @@
 2. 请求字幕时读取播放器接口；有可用平台字幕时即使开着 ASR 也会**优先使用字幕**，跳过语音识别。不少视频并没有开放字幕，此时只有配置了 ASR provider 才会得到文字。
 3. 画面优先从 B 站视频快照雪碧图中裁剪**最多六张**关键帧，覆盖视频前约 90%，不必下载整段视频；故事板不可用才回退到媒体下载 + ffmpeg 按间隔抽帧。后者生成的帧数可能超过六张。
 4. 显式请求 ASR 且没有取到字幕时，优先只下载音轨（`yt-dlp`，失败时尝试公开 playurl），用 ffmpeg 转成单声道 16 kHz WAV，然后调用本地 whisper.cpp；也可明确配置兼容 API 进行云端转写。没有独立音轨时可能下载视频。
+5. 本地 whisper.cpp 的转写在写入前会做后处理：用 OpenCC 把繁体统一成简体，去掉背景音乐导致的连续重复段，再把分段按停顿或字数上限合并成段落，而不是一句一行。带时间戳的原始分段保留在同目录的 `asr.json`。
 
 `fetch_assets` 默认 `wantSubtitles: true`、`wantKeyframes: false`、`keyframeIntervalSec: 10`，所以**不传参就是“只要文字”**：平台字幕或转写稿，绝不会为了截帧去下载整片视频。`wantAsr` 在配置了 `VIDEO_MCP_ASR_PROVIDER` 时**自动开启**（有了平台字幕会自动跳过），显式传 `false` 才会关闭。需要看画面时传 `wantKeyframes: true`；B 站会用故事板雪碧图裁切，不下载视频，抖音没有故事板则会下整片 mp4（抽完默认删除，`VIDEO_MCP_KEEP_MEDIA=1` 可保留）。故事板图是预览缩略图而不是原视频高清帧，模型结论与 ASR 内容应对照原视频核查。
 
@@ -91,6 +92,7 @@ src/                         正式代码，`npm run build` 只编译这里（�
   pipeline/
     assets.ts                下载后处理：ffmpeg 转 16 kHz 单声道 WAV、ASR（本地 whisper 或
                              云端 API）、抽关键帧、落盘 manifest
+    asr-text.ts              把 whisper.cpp 的 JSON 分段转简体、去掉重复句、按停顿并段
 tests/                       测试，与 src/ 同构镜像；`npm test` 跑这里，不进入 dist
   config.test.ts             默认路径与环境变量优先级（含默认抖音 Cookie 文件）
   adapters/bilibili.test.ts  B 站输入解析、元数据、字幕、下载（mock fetch）
@@ -197,6 +199,7 @@ npx @modelcontextprotocol/inspector node dist/index.js
 | `VIDEO_MCP_ASR_PROVIDER` | 未设置时**自动判断**：能在 `Release/` 找到 whisper 程序与模型就用 `whisper_local`，否则 `none`；也可显式写 `whisper_local`、`openai_compatible` 或 `none`。非 `none` 时 `fetch_assets` 自动转写（可显式传 `wantAsr: false` 关闭）。 |
 | `VIDEO_MCP_WHISPER_BIN` / `VIDEO_MCP_WHISPER_MODEL` | 本地程序与模型路径；**默认自动取** `Release/whisper-*/whisper-cli.exe`（有 NVIDIA 显卡优先 CUDA 版）与 `Release/models/ggml-*.bin`（优先 turbo），都没有时才会去找 `PATH` 上的 `whisper-cli`。 |
 | `VIDEO_MCP_WHISPER_LANGUAGE` | 默认 `auto`，纯中文可设 `zh`。 |
+| `VIDEO_MCP_WHISPER_VAD_MODEL` | Silero VAD 模型路径；默认自动取 `Release/models/ggml-silero-*.bin`（有就启用）。转写前先切掉纯音乐／静音段，whisper 的复读和幻觉多发在这类区段；设为 `0`/`off` 可关闭。 |
 | `VIDEO_MCP_KEEP_MEDIA` | 设为 `1` 时保留抽帧后下载的整段视频（默认删除，只留 `keyframes/`、`audio_16k.wav` 等）。 |
 | `VIDEO_MCP_ASR_BASE_URL` / `VIDEO_MCP_ASR_API_KEY` / `VIDEO_MCP_ASR_MODEL` | 兼容语音转写 API；模型默认 `whisper-1`。**音频会发送给服务商。** |
 | `VIDEO_MCP_SUMMARY_BASE_URL` / `VIDEO_MCP_SUMMARY_API_KEY` / `VIDEO_MCP_SUMMARY_MODEL` | 兼容 chat completions 的摘要 API。**文本和可读取的画面图片可能发给服务商。** |

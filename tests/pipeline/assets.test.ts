@@ -6,7 +6,7 @@ import { it } from "node:test";
 import { CacheStore } from "../../src/cache/store.js";
 import type { PlatformAdapter } from "../../src/adapters/types.js";
 import type { VideoRef } from "../../src/types.js";
-import { estimateAsrTimeoutSec, fetchAssets, run } from "../../src/pipeline/assets.js";
+import { estimateAsrTimeoutSec, fetchAssets, run, whisperCliArgs } from "../../src/pipeline/assets.js";
 
 it("根据视频时长估算 Whisper 的转写时限，并限制最小和最大值", () => {
   assert.equal(estimateAsrTimeoutSec(116), 468);
@@ -23,6 +23,18 @@ it("Whisper 子进程超过上限或客户端取消时会终止", async () => {
   const pending = run(process.execPath, args, { signal: controller.signal });
   setTimeout(() => controller.abort(), 150);
   await assert.rejects(pending, /cancelled by client/);
+});
+
+it("Whisper 参数不携带上文、抑制非语音标记，并按需加 VAD", () => {
+  const base = { model: "m.bin", audioPath: "a.wav", outBase: "out/asr", language: "auto" };
+  const withoutVad = whisperCliArgs(base);
+  assert.deepEqual(withoutVad, [
+    "-m", "m.bin", "-f", "a.wav", "-l", "auto", "-mc", "0", "-sns", "-oj", "-of", "out/asr",
+  ]);
+  assert.deepEqual(
+    whisperCliArgs({ ...base, vadModel: "vad.bin" }).slice(9, 12),
+    ["--vad", "-vm", "vad.bin"],
+  );
 });
 
 it("抽帧后默认删除下载的整段视频，VIDEO_MCP_KEEP_MEDIA=1 时保留", async () => {
