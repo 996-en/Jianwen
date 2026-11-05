@@ -2,16 +2,16 @@
 
 [English](README.md) | 简体中文
 
-**让 AI 先“看见”和“听见”，再讨论视频。** 见闻是一个运行在本机、通过 stdio 提供服务的 MCP 工具：解析 B 站或抖音视频，整理标题和互动数据、字幕／语音转写、画面关键帧，再把可读取的文字与本地文件路径交给 Pi、Cursor、Claude Desktop 等客户端。
+**让 AI 先“看见”和“听见”，再讨论视频。** 见闻是一个运行在本机、通过 stdio 提供服务的 MCP 工具：解析 B 站或抖音视频、微信公众号图文，整理标题和互动数据、字幕／语音转写、画面关键帧或文章正文，再把可读取的文字与本地文件路径交给 Pi、Cursor、Claude Desktop 等客户端。
 
-名字虽然不绑定平台，**目前实现了 B 站与抖音**。抖音需要浏览器签发的访客 Cookie，因为它的详情接口要求浏览器身份和签名（见下文）；其他平台尚未实现。
+名字虽然不绑定平台，**目前实现了 B 站、抖音与微信公众号图文**。抖音需要浏览器签发的访客 Cookie，因为它的详情接口要求浏览器身份和签名（见下文）；微信长链可能需要 `chksm`，短链通常可直接读取。微信视频号（Channels）尚未实现。
 
 ## 能做什么
 
 | MCP 工具 | 作用 |
 | --- | --- |
-| `resolve_video` | 解析 B 站链接、`b23.tv` 短链、BV／av 号，返回标题、首 P 时长、作者／UID、发布时间、互动数及 `aid`/`cid`；也解析抖音作品链接、`v.douyin.com` 分享链接或 aweme id，返回标题、时长、作者、发布时间与互动数。 |
-| `fetch_assets` | 获取字幕，按需进行语音转写或抽取关键帧，写入本地 `AssetManifest`。默认只取文字，需要画面必须显式要帧。 |
+| `resolve_video` | 解析 B 站链接、`b23.tv` 短链、BV／av 号，返回标题、首 P 时长、作者／UID、发布时间、互动数及 `aid`/`cid`；也解析抖音作品链接、`v.douyin.com` 分享链接或 aweme id，返回标题、时长、作者、发布时间与互动数；还解析微信文章短链／长链，返回标题、公众号、作者、发布时间、正文与图片地址。 |
+| `fetch_assets` | 获取字幕，按需进行语音转写或抽取关键帧，写入本地 `AssetManifest`。默认只取文字，需要画面必须显式要帧；微信文章写 `article.md`／`article.html`，按需下载正文图片。 |
 | `get_cached` | 读取已有缓存清单，不重复下载媒体。 |
 | `summarize` | 可选：将已有文字与最多六张关键帧发送到配置好的 OpenAI 兼容聊天／视觉 API，生成结构化摘要。 |
 
@@ -35,6 +35,13 @@
 4. 抖音**没有字幕轨道，也没有故事板**。请求 ASR 或关键帧时会下载 `play_addr` 的完整 mp4（h264 + aac）；`bit_rate[*].play_addr` 多是纯视频 DASH 流、没有音轨，所以不使用。之后复用原有管线：ffmpeg 转单声道 16 kHz WAV 做 ASR、ffmpeg 抽帧。
    **只要文字、不要画面时（即默认路径）**：ffmpeg 会直接读 CDN 地址，而不是先下整片 —— 抖音 CDN 支持 `206 Partial Content` 且 `moov` 在文件头，因此只需下载音轨部分（11 分钟的视频约 10 MB，而不是 35 MB），并一次性写成 16 kHz WAV。任何一步失败（没装 ffmpeg、CDN 拒 Range、签名过期）都会静默回落到整片下载，所以**产物完全一样，只是省流量／省磁盘**；总耗时基本不变，因为大头是 Whisper。想恢复“总是先下整片”设 `VIDEO_MCP_DOUYIN_FAST_AUDIO=0`。
 5. 抖音网页接口通常把 `play_count` 返回为 0，因此 `stats.views` 会留空而不是填 0。作者 ID 是 `sec_uid` 字符串，放不进数字型的 `authorId`，改放在 `extras.authorSecUid`。
+
+### 微信公众号数据从哪里来
+
+1. 支持短链 `https://mp.weixin.qq.com/s/<id>`、长链 `https://mp.weixin.qq.com/s?__biz=...&mid=...&idx=...&sn=...`，以及包含链接的整段分享文字。`resolve_video` 提取标题、公众号、作者、发布时间（`ct`）、`#js_content` 正文和最多 50 个正文图片地址；`fetch_assets` 写 `article.md` 与 `article.html`，传 `wantKeyframes: true` 时最多下载 20 张正文图到 `images/`。文章会完全跳过 ffmpeg 与 ASR。
+2. 短链通常直接返回正文；长链更容易跳 `mp/wappoc_appmsgcaptcha`（“环境异常”）。长链自带有效 `chksm` 时优先使用；否则依次尝试配置值、已学／已持久化的缓存、`mp/getappmsgext` 返回的 `pre_article_link`/`next_article_link`、百度索引，最后才用 `src/adapters/weixin-seeds.ts` 内置的 20 条人民日报文章长链兜底（每条都自带公开索引里的 `chksm`）。首次成功的 token 会立即写缓存，下次优先复用。
+3. `chksm` 是服务端签名，不能由 `biz`/`mid`/`idx`/`sn` 算出，也可能过期或轮换。内置文章只负责“起个头”：某个 token 失效会自动试下一条，全部失败才返回 `WEIXIN_CAPTCHA`，提示改用短链或配置 token。
+4. 只支持公众号**图文**；视频号视频、付费文章、已删除文章不支持。账号注销、发布者删除、作者隐私设置不可见、违规/侵权下架会返回 `NOT_FOUND`，并在错误信息里带上具体原因；只有确实遇到验证码时才返回 `WEIXIN_CAPTCHA`。请遵守微信的访问频率与使用条款；本项目不会尝试破解滑块验证码。
 
 Cookie 获取方式：用浏览器打开目标作品，用任意 Cookie 导出扩展导出 `douyin.com` 的 `cookies.txt`；或在开发者工具 Network 里找到 `aweme/detail` 请求，复制其 `Cookie` 请求头。`VIDEO_MCP_DOUYIN_UA` 最好与签发 Cookie 的浏览器一致，UA 不一致可能导致空响应。
 
@@ -73,8 +80,8 @@ src/                         正式代码，`npm run build` 只编译这里（�
                              get_cached / summarize 四个工具，启动 stdio 传输
   resolve.ts                 入参归一化：url、id、"platform:id"、完整 VideoRef 四种写法 → VideoRef
   types.ts                   全局类型：VideoRef、VideoStats、AssetManifest、VideoMcpError 与错误码
-  config.ts                  读取 VIDEO_MCP_* 环境变量，给出项目根路径、默认 Cookie 文件、
-                             两个平台的 UA、ASR 与摘要模型配置
+  config.ts                  读取 VIDEO_MCP_* 环境变量，给出项目根路径、默认抖音 Cookie 文件、
+                             三个平台的 UA、ASR 与摘要模型配置
   summarize.ts               调用 OpenAI 兼容的 chat completions，把元数据 + 字幕/转写 +
                              关键帧清单整理成分段提要
   adapters/                  平台适配层，一个平台一组文件
@@ -87,6 +94,10 @@ src/                         正式代码，`npm run build` 只编译这里（�
                              bilibili.ts 降级为下载整段视频
     douyin.ts                抖音：短链跳转、Cookie 会话、签名后的详情请求、媒体候选下载
     douyin-sign.ts           抖音 query 签名 x-secsdk-web-signature 与固定网页端参数（纯函数）
+    weixin.ts                微信公众号图文：URL 识别、HTML 标题/正文/图片解析、chksm 兜底、
+                             article.md/article.html 写入
+    weixin-seeds.ts          内置人民日报文章长链，每条自带 chksm
+    weixin-chksm.ts          chksm 持久化与种子短链缓存
   cache/
     store.ts                 缓存根目录、<platform>/<id>/ 布局、manifest.json 读写
   pipeline/
@@ -100,6 +111,7 @@ tests/                       测试，与 src/ 同构镜像；`npm test` 跑这�
   adapters/douyin.test.ts    抖音输入识别、Cookie 文件解析、resolve 字段映射、错误码、
                              媒体候选（mock fetch）
   adapters/douyin-sign.test.ts  签名算法离线回归，无网络也能跑
+  adapters/weixin.test.ts    微信 URL 识别、HTML 解析、验证码/chksm 路径、图片下载（mock fetch）
   cache/store.test.ts        缓存目录与 manifest 往返
   pipeline/assets.test.ts    转码/ASR/抽帧编排（mock 外部命令）
 scripts/
@@ -208,6 +220,10 @@ npx @modelcontextprotocol/inspector node dist/index.js
 | `VIDEO_MCP_DOUYIN_COOKIES` | 直接给出 `Cookie` 头原文（代替文件），其中必须含 `UIFID`。 |
 | `VIDEO_MCP_DOUYIN_UA` | 自定义抖音请求的 User-Agent（默认 Windows 上的 Chrome 156），建议与签发 Cookie 的浏览器保持一致。 |
 | `VIDEO_MCP_DOUYIN_FAST_AUDIO` | **默认开启**：仅需转写的抖音请求会让 ffmpeg 直接从 CDN 流式抽音轨，不再下载整片 mp4（11 分钟视频约 10 MB，而不再 35 MB）；任何失败都会自动回落到整片下载。设 `0` 可改为总是下载整片。 |
+| `VIDEO_MCP_WEIXIN_UA` | 自定义微信请求的 User-Agent（默认 Windows 上的 Chrome 156）。 |
+| `VIDEO_MCP_WEIXIN_CHKSM` | 可选：微信长链的 `chksm` 签名。短链通常不需要；显式值优先于缓存，否则复用上次成功的 token，再尝试相邻文章、搜索和内置文章种子。 |
+| `VIDEO_MCP_WEIXIN_CHKSM_FILE` | 覆盖 chksm 与种子链接的持久化位置（默认 `<cache>/weixin/chksm.json`）。 |
+| `VIDEO_MCP_WEIXIN_SEARCH` | 设 `0` 可跳过长链无 token 时的百度 `sn` 检索；默认开启。 |
 
 不配置摘要 API 时，`summarize` 返回 `SUMMARY_UNSET`，其他工具仍能使用。不要提交密钥。已下载的音频、WAV、帧图、字幕和清单会留在本机缓存，需自行清理；常规 MCP 工具返回文字与**本地路径**，不会自动把所有帧编码到聊天上下文。
 
@@ -221,6 +237,8 @@ fetch_assets   { "id": "BV1VqsQ6KEoy", "wantKeyframes": true, "keyframeIntervalS
 get_cached     { "id": "BV1VqsQ6KEoy" }
 resolve_video  { "url": "https://v.douyin.com/j9yY-DusDuk/" }
 fetch_assets   { "id": "7703476743591513353", "wantAsr": true }
+resolve_video  { "url": "https://mp.weixin.qq.com/s/__eualYM-v92zEARWVszhQ" }
+fetch_assets   { "id": "22eec806d6a5608c3c65dfc32200d676", "wantKeyframes": true }
 ```
 
 第一条只取“便宜的东西”：有平台字幕就用字幕，没有就转写（需配置 ASR provider）；不传 `wantKeyframes: true` 就不会为了截帧下载视频。**不会凭标题编造内容**。素材放在 `<缓存目录>/bilibili/<BV号>/`，包含 `manifest.json`，以及可能存在的 `subtitle.txt`、`asr.txt`、`audio_16k.wav`、`keyframes/` 等；整段 `media.mp4` 在抽帧或转写完成后会自动删除（`VIDEO_MCP_KEEP_MEDIA=1` 可保留）。需要新的互动数快照时重新调用 `fetch_assets`。
@@ -236,7 +254,7 @@ fetch_assets   { "id": "7703476743591513353", "wantAsr": true }
 - **没有关键帧：**故事板可能不可用；回退抽帧要求能下载媒体、能执行 ffmpeg，通常建议安装 yt-dlp。暂不支持登录态、Cookie、大会员或付费视频。
 - **缓存未命中：**先调用 `fetch_assets`；`get_cached` 才能读取。旧缓存的互动数据不会自动刷新。
 - **长任务中断：**要看客户端自身的请求超时；单独增大 `asrTimeoutSec` 并不能改变客户端超时。Pi 修改 MCP 配置后可能需要 `/reload`。
-- **平台范围：**`src/adapters/registry.ts` 注册了 B 站与抖音。抖音依赖浏览器访客 Cookie 与自行计算的签名；未配置 `VIDEO_MCP_DOUYIN_COOKIE_FILE` 时返回 `COOKIE_REQUIRED`。抖音返回 **HTTP 200 但响应体为空**时属于软风控／作品不可见，应刷新 Cookie，不要循环重试。图文作品（`/note/`）不支持；B 站与抖音的接口、Cookie 与签名机制完全不同，各自单独实现适配器。
+- **平台范围：**`src/adapters/registry.ts` 注册了 B 站、抖音与微信。抖音依赖浏览器访客 Cookie 与自行计算的签名；未配置 `VIDEO_MCP_DOUYIN_COOKIE_FILE` 时返回 `COOKIE_REQUIRED`。抖音返回 **HTTP 200 但响应体为空**时属于软风控／作品不可见，应刷新 Cookie，不要循环重试。图文作品（`/note/`）不支持。微信短链通常可直接读取；长链在没有有效 `chksm` 时返回 `WEIXIN_CAPTCHA`。已注销/删除/作者隐私设置不可见/违规下架的文章返回 `NOT_FOUND` 并说明原因。微信视频号暂不支持；三个平台的接口、Cookie 与签名机制完全不同，各自单独实现适配器。
 
 扩展平台需在 `src/adapters/` 实现 `PlatformAdapter` 并于 `src/adapters/registry.ts` 注册，变更后运行 `npm test`、`npm run build`。Windows Cursor 详细安装另见 [INSTALL_CN.md](INSTALL_CN.md)。
 

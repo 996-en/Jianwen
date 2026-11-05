@@ -67,9 +67,9 @@ const server = new McpServer({
 
 server.tool(
   "resolve_video",
-  "Resolve a Bilibili or Douyin video into a VideoRef (title, duration, author, publishedAt and engagement stats snapshot). Douyin requires browser guest cookies via VIDEO_MCP_DOUYIN_COOKIE_FILE or VIDEO_MCP_DOUYIN_COOKIES.",
+  "Resolve a Bilibili/Douyin video or a Weixin public-account article into a VideoRef (title, author, publishedAt and platform extras). Douyin requires browser guest cookies via VIDEO_MCP_DOUYIN_COOKIE_FILE or VIDEO_MCP_DOUYIN_COOKIES; Weixin long links may need VIDEO_MCP_WEIXIN_CHKSM, while short mp.weixin.qq.com/s/<id> links usually work directly.",
   {
-    url: z.string().optional().describe("Bilibili watch URL, b23.tv short link, Douyin video URL or v.douyin.com share link"),
+    url: z.string().optional().describe("Bilibili watch URL, b23.tv short link, Douyin video URL, v.douyin.com share link, or Weixin article URL (mp.weixin.qq.com/s/...)"),
     id: z.string().optional().describe("BV id (e.g. BV1xx...), av number, or Douyin aweme id"),
   },
   async ({ url, id }) => {
@@ -84,7 +84,7 @@ server.tool(
 
 server.tool(
   "fetch_assets",
-  "Cache subtitles, optional ASR and up to 6 storyboard frames; fall back to video download + ffmpeg if storyboard is unavailable. Local ASR timeout is estimated from durationSec or overridden with asrTimeoutSec; long operations report progress. Returns local paths. Bilibili exposes subtitles and a storyboard; Douyin has neither, so Douyin always downloads the video for ASR/frames.",
+  "Cache video assets (subtitles, optional ASR, up to 6 storyboard frames; fall back to video download + ffmpeg if storyboard is unavailable), or parse a Weixin public-account article into article.md/article.html and optional images. Local ASR timeout is estimated from durationSec or overridden with asrTimeoutSec; long operations report progress. Returns local paths. Bilibili exposes subtitles and a storyboard; Douyin has neither, so Douyin always downloads the video for ASR/frames; Weixin articles skip ASR/ffmpeg entirely.",
   {
     url: z.string().optional(),
     id: z.string().optional(),
@@ -95,12 +95,12 @@ server.tool(
     asrTimeoutSec: z.number().int().min(30).max(86400).optional()
       .describe("Optional Whisper process timeout in seconds; defaults to durationSec * 3 + 120 (min 300, max 86400). Does not change the MCP client's timeout."),
     wantKeyframes: z.boolean().optional().default(false)
-      .describe("Extract representative frames. Defaults to false: without it only text (platform subtitles or ASR) is collected, which avoids downloading the whole video on Douyin. Set true when you need to see the picture."),
+      .describe("Extract representative frames for videos, or download article images for Weixin. Defaults to false: without it only text (platform subtitles, ASR, or article text) is collected, which avoids downloading the whole video on Douyin. Set true when you need to see the picture."),
     keyframeIntervalSec: z.number().optional().default(10),
   },
   async (args, extra) => {
     const started = Date.now();
-    let stage = "正在解析视频信息";
+    let stage = "正在解析视频/文章信息";
     const token = extra._meta?.progressToken;
     const reportProgress = () => {
       if (token === undefined || extra.signal.aborted) return;
@@ -121,7 +121,7 @@ server.tool(
         id: args.id,
         ref: args.ref as VideoRef | undefined,
       });
-      if (args.wantAsr !== false && getAsrProvider() === "whisper_local") {
+      if (args.wantAsr !== false && getAsrProvider() === "whisper_local" && ref.durationSec > 0) {
         stage = `视频时长 ${ref.durationSec} 秒；Whisper 最长 ${args.asrTimeoutSec ?? estimateAsrTimeoutSec(ref.durationSec)} 秒`;
         reportProgress();
       }
@@ -180,7 +180,7 @@ server.tool(
 
 server.tool(
   "summarize",
-  "Optional structured summary from cached assets via VIDEO_MCP_SUMMARY_* env. Errors clearly if unset.",
+  "Optional structured summary from cached video assets or Weixin article text via VIDEO_MCP_SUMMARY_* env. Errors clearly if unset.",
   {
     url: z.string().optional(),
     id: z.string().optional(),

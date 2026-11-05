@@ -267,6 +267,30 @@ export async function fetchAssets(
     keyframeIntervalSec: interval,
   });
 
+  notes.push(...(media.notes ?? []));
+
+  // 微信公众号是图文而不是音视频：拿到正文后直接写 manifest，
+  // 不进入 ffmpeg / ASR / 抽帧分支，也不受 durationSec=0 的影响。
+  if (
+    media.articleText !== undefined ||
+    media.articlePath !== undefined ||
+    media.articleHtmlPath !== undefined
+  ) {
+    notes.push("Weixin article parsed; ASR and video keyframes were skipped.");
+    const manifest: AssetManifest = {
+      ref,
+      createdAt: new Date().toISOString(),
+      cacheDir: destDir,
+      articleText: media.articleText,
+      articlePath: media.articlePath,
+      articleHtmlPath: media.articleHtmlPath,
+      imagePaths: media.imagePaths,
+      notes,
+    };
+    await cache.writeManifest(manifest);
+    return manifest;
+  }
+
   let subtitleText = wantSubtitles ? media.subtitleText : undefined;
   let subtitlePath = wantSubtitles ? media.subtitlePath : undefined;
 

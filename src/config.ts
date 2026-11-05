@@ -173,6 +173,42 @@ export function douyinUserAgent(): string {
  * 默认开启：实测抖音 CDN 支持 Range 且 moov 在文件头，失败会自动回落到整片下载，
  * 因此默认开着不会改变结果，只是省流量。设 VIDEO_MCP_DOUYIN_FAST_AUDIO=0 可关掉。
  */
+/** 微信公众平台请求 UA；与浏览器导出的 Cookie 保持一致时成功率更高。 */
+export function weixinUserAgent(): string {
+  return (
+    process.env.VIDEO_MCP_WEIXIN_UA?.trim() ||
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
+  );
+}
+
+/**
+ * 长链文章缺少 chksm 时会被微信风控拦到验证码页。
+ * 可显式提供任意一个当前可用的 chksm（从能正常打开的文章 msg_link 中取）；
+ * 适配器也会在成功解析文章后自动记住一个。
+ */
+export function weixinChksm(): string | undefined {
+  const value = process.env.VIDEO_MCP_WEIXIN_CHKSM?.trim();
+  return value || undefined;
+}
+
+/** `chksm` 持久化文件；默认放在缓存目录，避免 MCP 重启后丢失。 */
+export function weixinChksmFile(): string {
+  const override = process.env.VIDEO_MCP_WEIXIN_CHKSM_FILE?.trim();
+  if (override) return path.resolve(override);
+  const cacheRoot = process.env.VIDEO_MCP_CACHE_DIR?.trim();
+  return path.join(
+    cacheRoot ? path.resolve(cacheRoot) : path.join(projectRoot, "cache"),
+    "weixin",
+    "chksm.json",
+  );
+}
+
+/** 没有可用 chksm 时是否用百度索引兜底；设 VIDEO_MCP_WEIXIN_SEARCH=0 关闭。 */
+export function weixinSearchEnabled(): boolean {
+  const v = (process.env.VIDEO_MCP_WEIXIN_SEARCH ?? "").trim().toLowerCase();
+  return !(v === "0" || v === "false" || v === "no" || v === "off");
+}
+
 export function douyinFastAudio(): boolean {
   const v = (process.env.VIDEO_MCP_DOUYIN_FAST_AUDIO ?? "").trim().toLowerCase();
   return !(v === "0" || v === "false" || v === "no" || v === "off");

@@ -84,6 +84,53 @@ it("抽帧后默认删除下载的整段视频，VIDEO_MCP_KEEP_MEDIA=1 时保�
   }
 });
 
+it("文章适配器返回正文时跳过 ASR、ffmpeg 和抽帧", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "weixin-assets-test-"));
+  const ref: VideoRef = {
+    platform: "weixin",
+    id: "22eec806d6a5608c3c65dfc32200d676",
+    title: "测试文章",
+    author: "测试公众号",
+    durationSec: 0,
+    pageUrl: "https://mp.weixin.qq.com/s/__eualYM-v92zEARWVszhQ",
+  };
+  const adapter: PlatformAdapter = {
+    platform: "weixin",
+    canHandle: () => true,
+    resolve: async () => ref,
+    fetchMedia: async (_ref, dir) => {
+      const articlePath = path.join(dir, "article.md");
+      const articleHtmlPath = path.join(dir, "article.html");
+      await fs.writeFile(articlePath, "# 测试文章\n\n正文", "utf8");
+      await fs.writeFile(articleHtmlPath, "<html>正文</html>", "utf8");
+      return {
+        articleText: "正文内容",
+        articlePath,
+        articleHtmlPath,
+        notes: ["article note"],
+      };
+    },
+  };
+  const cache = new CacheStore(root);
+  const previousProvider = process.env.VIDEO_MCP_ASR_PROVIDER;
+  try {
+    process.env.VIDEO_MCP_ASR_PROVIDER = "none";
+    const manifest = await fetchAssets(adapter, ref, cache, { wantKeyframes: true });
+    assert.equal(manifest.articleText, "正文内容");
+    assert.equal(manifest.articlePath, path.join(manifest.cacheDir, "article.md"));
+    assert.equal(manifest.articleHtmlPath, path.join(manifest.cacheDir, "article.html"));
+    assert.equal(manifest.asrText, undefined);
+    assert.equal(manifest.videoPath, undefined);
+    assert.ok(manifest.notes?.includes("article note"));
+    assert.ok(manifest.notes?.some((note) => note.includes("ASR and video keyframes were skipped")));
+    assert.equal((await cache.readManifest(ref))?.articleText, "正文内容");
+  } finally {
+    if (previousProvider === undefined) delete process.env.VIDEO_MCP_ASR_PROVIDER;
+    else process.env.VIDEO_MCP_ASR_PROVIDER = previousProvider;
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 it("没有平台字幕又未配置 ASR 时会提示如何开启转写", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "asr-hint-test-"));
   const ref: VideoRef = {

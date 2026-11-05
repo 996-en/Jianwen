@@ -1,7 +1,7 @@
 {
   "name": "jianwen",
   "version": "0.1.0",
-  "description": "Jianwen (见闻): local MCP server that turns media from online platforms (Bilibili, Douyin) into model-readable context - metadata, subtitles, ASR and keyframes",
+  "description": "Jianwen (见闻): local MCP server that turns media and articles from online platforms (Bilibili, Douyin, Weixin public accounts) into model-readable context - metadata, subtitles, ASR, keyframes and article text",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -22,6 +22,9 @@
     "mcp",
     "bilibili",
     "douyin",
+    "weixin",
+    "wechat",
+    "article",
     "tiktok",
     "video",
     "media",

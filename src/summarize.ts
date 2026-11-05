@@ -10,6 +10,15 @@ export interface SummaryResult {
   rawModelText?: string;
 }
 
+function imageMimeType(file: string): string {
+  const ext = file.toLowerCase().split(".").pop();
+  if (ext === "png") return "image/png";
+  if (ext === "gif") return "image/gif";
+  if (ext === "webp") return "image/webp";
+  if (ext === "bmp") return "image/bmp";
+  return "image/jpeg";
+}
+
 export async function summarizeManifest(
   manifest: AssetManifest,
   focus?: string,
@@ -22,28 +31,37 @@ export async function summarizeManifest(
     );
   }
 
+  // 公众号文章没有字幕/ASR，但 articleText 就是完整正文；视频仍按原优先级。
+  const isArticle = Boolean(manifest.articleText || manifest.articlePath);
   const transcript =
+    manifest.articleText ||
     manifest.subtitleText ||
     manifest.asrText ||
     "(no transcript available)";
 
-  const frameNote =
-    manifest.keyframePaths && manifest.keyframePaths.length
-      ? `Keyframe image paths on disk (client may read): ${manifest.keyframePaths
-          .slice(0, 12)
-          .join(", ")}${manifest.keyframePaths.length > 12 ? " ..." : ""}`
+  const visualPaths = manifest.imagePaths?.length
+    ? manifest.imagePaths
+    : manifest.keyframePaths;
+  const frameNote = visualPaths?.length
+    ? `${isArticle ? "Article image" : "Keyframe image"} paths on disk (client may read): ${visualPaths
+        .slice(0, 12)
+        .join(", ")}${visualPaths.length > 12 ? " ..." : ""}`
+    : isArticle
+      ? "No article images cached."
       : "No keyframes cached.";
 
-  const system = `You are a careful video analyst. Given a transcript and metadata from a video, produce a structured Chinese or English summary (match the transcript language) as JSON with keys: chapters (array of {heading, points[]}), keyPoints (string[]), conclusion (string).`;
+  const system = isArticle
+    ? `You are a careful article analyst. Given a Weixin public-account article and its metadata, produce a structured Chinese or English summary (match the article language) as JSON with keys: chapters (array of {heading, points[]}), keyPoints (string[]), conclusion (string).`
+    : `You are a careful video analyst. Given a transcript and metadata from a video, produce a structured Chinese or English summary (match the transcript language) as JSON with keys: chapters (array of {heading, points[]}), keyPoints (string[]), conclusion (string).`;
 
   const user = [
     `Title: ${manifest.ref.title}`,
     `Author: ${manifest.ref.author}`,
-    `DurationSec: ${manifest.ref.durationSec}`,
+    manifest.ref.durationSec > 0 ? `DurationSec: ${manifest.ref.durationSec}` : "",
     `URL: ${manifest.ref.pageUrl}`,
     focus ? `Focus: ${focus}` : "",
     "",
-    "Transcript:",
+    isArticle ? "Article text:" : "Transcript:",
     transcript.slice(0, 60000),
     "",
     frameNote,
@@ -57,7 +75,7 @@ export async function summarizeManifest(
     | { type: "image_url"; image_url: { url: string } }
   > = [{ type: "text", text: user }];
 
-  const frames = (manifest.keyframePaths ?? []).slice(0, 6);
+  const frames = (visualPaths ?? []).slice(0, 6);
   for (const fp of frames) {
     try {
       const buf = await fs.readFile(fp);
@@ -65,7 +83,7 @@ export async function summarizeManifest(
       const b64 = buf.toString("base64");
       content.push({
         type: "image_url",
-        image_url: { url: `data:image/jpeg;base64,${b64}` },
+        image_url: { url: `data:${imageMimeType(fp)};base64,${b64}` },
       });
     } catch {
       // skip unreadable

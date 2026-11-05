@@ -8,6 +8,14 @@ export interface MediaFetchResult {
   subtitleText?: string;
   subtitlePath?: string;
   keyframePaths?: string[];
+  /** 微信公众号正文纯文本；存在时 pipeline 会跳过 ASR/ffmpeg */
+  articleText?: string;
+  articlePath?: string;
+  articleHtmlPath?: string;
+  /** 微信公众号正文图片（由 wantKeyframes 控制是否下载） */
+  imagePaths?: string[];
+  /** 适配器附带的提示，由 pipeline 合并进 manifest.notes */
+  notes?: string[];
   storyboardError?: string;
 }
 

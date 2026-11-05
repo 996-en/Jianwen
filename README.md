@@ -2,16 +2,16 @@
 
 English | [简体中文](README.zh-CN.md)
 
-**Give an AI something to see and hear before asking it to explain a video.** Jianwen is a local, stdio-based MCP server. It resolves a Bilibili or Douyin video, collects metadata, subtitles or speech transcripts, and representative frames, then returns an asset manifest to an MCP client such as Pi, Cursor, or Claude Desktop.
+**Give an AI something to see and hear before asking it to explain a video.** Jianwen is a local, stdio-based MCP server. It resolves a Bilibili or Douyin video, or a Weixin public-account article, collects metadata, subtitles or speech transcripts, representative frames, or article text, then returns an asset manifest to an MCP client such as Pi, Cursor, or Claude Desktop.
 
-The name is platform-neutral; **Bilibili and Douyin are implemented**. Douyin needs browser-issued guest cookies, because its detail endpoint rejects requests without a browser identity signature (see below). Other platforms are not implemented.
+The name is platform-neutral; **Bilibili, Douyin, and Weixin public-account articles are implemented**. Douyin needs browser-issued guest cookies, because its detail endpoint rejects requests without a browser identity signature (see below). Weixin long links may need a `chksm` token; short links usually work directly. Weixin Channels (视频号) videos are not implemented yet.
 
 ## What it does
 
 | MCP tool | Result |
 | --- | --- |
-| `resolve_video` | Resolve a Bilibili URL, `b23.tv` short link, BV ID, or av ID to title, first-page duration, author/UID, publication time, engagement counts, and `aid`/`cid`. Also resolves a Douyin video URL, `v.douyin.com` share link, or aweme id to title, duration, author, publication time and interaction counts. |
-| `fetch_assets` | Fetch available subtitles, optionally transcribe speech and/or extract keyframes; save an `AssetManifest` and local files. Text only by default; frames must be asked for. |
+| `resolve_video` | Resolve a Bilibili URL, `b23.tv` short link, BV ID, or av ID to title, first-page duration, author/UID, publication time, engagement counts, and `aid`/`cid`. Also resolves a Douyin video URL, `v.douyin.com` share link, or aweme id to title, duration, author, publication time and interaction counts. Also resolves a Weixin article URL (`mp.weixin.qq.com/s/<id>` or `mp.weixin.qq.com/s?__biz=...`) to title, account, author, publication time, body text and image URLs. |
+| `fetch_assets` | Fetch available subtitles, optionally transcribe speech and/or extract keyframes; save an `AssetManifest` and local files. Text only by default; frames must be asked for. For Weixin articles, writes `article.md` / `article.html` and optionally downloads article images. |
 | `get_cached` | Read a previously saved manifest without re-downloading its media. |
 | `summarize` | Optionally send cached text and up to six frames to a configured OpenAI-compatible chat/vision endpoint for a structured summary. |
 
@@ -35,6 +35,13 @@ Default `fetch_assets` options are `wantSubtitles: true`, `wantKeyframes: false`
 4. Douyin exposes **no subtitle tracks and no storyboard**. If ASR or frames are requested, the server downloads the complete `play_addr` mp4 (h264 + aac) — the `bit_rate[*].play_addr` entries are usually video-only DASH streams without an audio track — and then reuses the normal pipeline: ffmpeg → mono 16 kHz WAV for ASR, ffmpeg frame sampling for keyframes.
    **Transcript only (no frames):** this is the default path, and ffmpeg reads the CDN URL directly instead of downloading the whole file — the CDN answers `206 Partial Content` and keeps `moov` at the start, so ffmpeg pulls only the audio bytes (~10 MB instead of ~35 MB for an 11-minute video) and writes the 16 kHz WAV in one pass. Any failure (no ffmpeg, CDN refusing ranges, expired signature) silently falls back to the full download, so results never change — only the transfer size does. Set `VIDEO_MCP_DOUYIN_FAST_AUDIO=0` to force the old behaviour. Wall time is unchanged because Whisper dominates.
 5. Douyin's web API usually reports `play_count` as 0, so `stats.views` is omitted rather than reported as zero. Author ids are `sec_uid` strings, which do not fit the numeric `authorId` field; they are returned in `extras.authorSecUid`.
+
+### How Weixin articles are obtained
+
+1. Input can be a short link `https://mp.weixin.qq.com/s/<id>` or a full long link `https://mp.weixin.qq.com/s?__biz=...&mid=...&idx=...&sn=...`; a share message containing the link also works. `resolve_video` extracts the title, account name, author, publication time (`ct`), body text under `#js_content`, and up to 50 article image URLs. `fetch_assets` writes `article.md` and `article.html`; `wantKeyframes: true` downloads up to 20 article images into `images/`. Articles skip ffmpeg and ASR entirely.
+2. Short links are usually served directly. Long links are much more likely to hit `mp/wappoc_appmsgcaptcha` ("环境异常"). When the long link already carries a valid `chksm`, Jianwen uses it first. Otherwise it tries the configured token, a learned/persisted token, `mp/getappmsgext`'s `pre_article_link`/`next_article_link`, a Baidu index lookup, and finally 20 built-in People's Daily article links kept in `src/adapters/weixin-seeds.ts` (each link carries a public `chksm`). The first successful token is written to the cache and reused by later runs.
+3. `chksm` is a server-side signature, not a hash that can be computed from `biz`/`mid`/`idx`/`sn`. It may expire or rotate. The built-in articles are only a bootstrap: if one token has expired, Jianwen tries the next one, then returns `WEIXIN_CAPTCHA` with a hint to use a short link or configure a token.
+4. Only public-account **articles** are supported. Weixin Channels (视频号) video posts, paywalled articles, and deleted articles are not. Cancelled accounts, publisher-deleted posts, author-privacy-hidden posts, and violation/infringement takedowns return `NOT_FOUND` with the specific reason; `WEIXIN_CAPTCHA` is reserved for actual captcha pages. Respect Weixin's rate limits and terms; the server does not attempt to solve slider captchas.
 
 How to get cookies: open the target video in your browser, then export `cookies.txt` for `douyin.com` with any cookie-export extension, or copy the `Cookie` request header from DevTools (Network → the `aweme/detail` request). Keep `VIDEO_MCP_DOUYIN_UA` equal to the browser's own User-Agent; a mismatch can trigger an empty response.
 
@@ -73,7 +80,7 @@ src/                         production code; `npm run build` compiles only this
                              starts the stdio transport
   resolve.ts                 input normalisation: url, id, "platform:id" or a full VideoRef → VideoRef
   types.ts                   shared types: VideoRef, VideoStats, AssetManifest, VideoMcpError codes
-  config.ts                  reads VIDEO_MCP_* variables; project root, default cookie file,
+  config.ts                  reads VIDEO_MCP_* variables; project root, Douyin default cookie file,
                              per-platform user agents, ASR and summary settings
   summarize.ts               calls an OpenAI-compatible chat completions endpoint and turns
                              metadata + subtitle/ASR text + keyframe list into a chaptered summary
@@ -89,6 +96,10 @@ src/                         production code; `npm run build` compiles only this
                              media candidate download
     douyin-sign.ts           Douyin query signature x-secsdk-web-signature and the fixed web
                              parameters (pure functions)
+    weixin.ts                Weixin public-account articles: URL parsing, HTML metadata/body/image
+                             extraction, chksm fallback, article.md/article.html writer
+    weixin-seeds.ts          Built-in People's Daily article links, each carrying a chksm
+    weixin-chksm.ts          chksm persistence and seed-URL cache
   cache/
     store.ts                 cache root, <platform>/<id>/ layout, manifest.json read/write
   pipeline/
@@ -102,6 +113,8 @@ tests/                       tests mirroring src/; `npm test` runs these, never 
   adapters/douyin.test.ts    Douyin input detection, cookie file parsing, resolve field mapping,
                              error codes, media candidates (mocked fetch)
   adapters/douyin-sign.test.ts  offline regression for the signature algorithm (no network)
+  adapters/weixin.test.ts   Weixin URL detection, HTML parsing, captcha/chksm path, image download
+                             (mocked fetch)
   cache/store.test.ts        cache directories and manifest round-trip
   pipeline/assets.test.ts    transcode/ASR/keyframe orchestration (mocked external commands)
 scripts/
@@ -210,6 +223,10 @@ The historical `VIDEO_MCP_` prefix is retained for compatibility with older conf
 | `VIDEO_MCP_DOUYIN_COOKIES` | Raw `Cookie` header value for Douyin, used instead of the file. Must contain `UIFID`. |
 | `VIDEO_MCP_DOUYIN_UA` | Override the Douyin request User-Agent (default Chrome 156 on Windows). Keep it consistent with the browser that issued the cookies. |
 | `VIDEO_MCP_DOUYIN_FAST_AUDIO` | Also controls how transcript-only Douyin requests get their audio. **On by default**: ffmpeg streams the audio track out of the CDN URL instead of downloading the whole mp4 (≈10 MB instead of ≈35 MB for an 11-minute video), falling back automatically on any failure. Set `0` to always download the full file. |
+| `VIDEO_MCP_WEIXIN_UA` | Override the Weixin request User-Agent (default Chrome 156 on Windows). |
+| `VIDEO_MCP_WEIXIN_CHKSM` | Optional `chksm` signature for Weixin long links. Short links (`/s/<id>`) usually need none. An explicit value wins over the cache; otherwise the server reuses the last successful token, then tries adjacent articles, search, and built-in article seeds. |
+| `VIDEO_MCP_WEIXIN_CHKSM_FILE` | Override where the learned `chksm` and its seed URL are persisted (default `<cache>/weixin/chksm.json`). |
+| `VIDEO_MCP_WEIXIN_SEARCH` | Set `0` to skip the Baidu `sn` lookup when a long link has no token. On by default. |
 
 If the summary provider is unset, `summarize` returns `SUMMARY_UNSET`; the other three tools work independently. Avoid committing credentials. Cached audio, WAV, frames, subtitles and the manifest remain on disk until you delete them; normal MCP results include text and **local paths**, not embedded frame images.
 
@@ -223,6 +240,8 @@ fetch_assets   { "id": "BV1VqsQ6KEoy", "wantKeyframes": true, "keyframeIntervalS
 get_cached     { "id": "BV1VqsQ6KEoy" }
 resolve_video  { "url": "https://v.douyin.com/j9yY-DusDuk/" }
 fetch_assets   { "id": "7703476743591513353", "wantAsr": true }
+resolve_video  { "url": "https://mp.weixin.qq.com/s/__eualYM-v92zEARWVszhQ" }
+fetch_assets   { "id": "22eec806d6a5608c3c65dfc32200d676", "wantKeyframes": true }
 ```
 
 The first call takes whatever comes cheap: platform subtitles when they exist, otherwise a transcript once ASR is configured. It never downloads media for sampling unless you pass `wantKeyframes: true`. Do not infer what the video says from its title alone. `fetch_assets` stores files under `<cache>/bilibili/<BV-ID>/` (`manifest.json`, optional `subtitle.txt`, `asr.txt`, `audio_16k.wav`, `keyframes/`, etc.); the full `media.mp4` is removed automatically once frames or a transcript exist (`VIDEO_MCP_KEEP_MEDIA=1` keeps it). If content has changed, call `fetch_assets` again for a fresh metadata snapshot.
@@ -238,7 +257,7 @@ On the maintainer's test machine, the example BV above yielded a local transcrip
 - **No frames?** Storyboard may be unavailable; the fallback needs media access, ffmpeg, and sometimes yt-dlp. Paywalled, VIP, or login-only material is unsupported; the server does not use cookies.
 - **No cache?** `get_cached` returns `CACHE_MISS` until `fetch_assets` has written a manifest. A cached manifest does not update its engagement counts automatically.
 - **Long operations?** Raise the client's request timeout as needed; the Whisper timeout override alone does not extend it. A freshly edited Pi MCP config may require `/reload`.
-- **Platform scope:** `src/adapters/registry.ts` registers Bilibili and Douyin. Douyin needs browser guest cookies plus a signed detail query; without `VIDEO_MCP_DOUYIN_COOKIE_FILE` it fails with `COOKIE_REQUIRED`. A `200` response with an **empty body** is Douyin's soft rate-limit / not-visible signal — refresh the cookies instead of retrying in a loop. Image posts (`/note/`) are unsupported. Bilibili's authorized APIs and Douyin's signed web endpoints differ, so each platform keeps its own adapter.
+- **Platform scope:** `src/adapters/registry.ts` registers Bilibili, Douyin and Weixin. Douyin needs browser guest cookies plus a signed detail query; without `VIDEO_MCP_DOUYIN_COOKIE_FILE` it fails with `COOKIE_REQUIRED`. A `200` response with an **empty body** is Douyin's soft rate-limit / not-visible signal — refresh the cookies instead of retrying in a loop. Image posts (`/note/`) are unsupported. Weixin short links usually work; long links may return `WEIXIN_CAPTCHA` when no valid `chksm` is available. Cancelled/deleted/author-privacy-hidden/takedown articles return `NOT_FOUND` with the reason. Weixin Channels (视频号) videos are not supported. Bilibili's authorized APIs, Douyin's signed web endpoints, and Weixin's article pages differ, so each platform keeps its own adapter.
 
 To add another platform, implement `PlatformAdapter` in `src/adapters/` and register it in `src/adapters/registry.ts`. Run `npm test` and `npm run build` after changes. For a more detailed Chinese walkthrough, see [README.zh-CN.md](README.zh-CN.md) and [Windows Cursor setup](INSTALL_CN.md).
 

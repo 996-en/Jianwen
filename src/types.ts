@@ -49,6 +49,14 @@ export interface AssetManifest {
   audioPath?: string;
   videoPath?: string;
   keyframePaths?: string[];
+  /** 微信公众号文章正文纯文本 */
+  articleText?: string;
+  /** 微信公众号文章 Markdown 文件 */
+  articlePath?: string;
+  /** 微信公众号文章原始 HTML 文件 */
+  articleHtmlPath?: string;
+  /** 微信公众号正文图片的本地路径（仅 wantKeyframes=true 时下载） */
+  imagePaths?: string[];
   notes?: string[];
 }
 
@@ -63,6 +71,7 @@ export class VideoMcpError extends Error {
       | "DOWNLOAD_FAILED"
       | "FFMPEG_MISSING"
       | "ASR_UNAVAILABLE"
+      | "WEIXIN_CAPTCHA"
       | "SUMMARY_UNSET"
       | "CACHE_MISS"
       | "INTERNAL",
