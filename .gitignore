@@ -34,5 +34,12 @@ coverage/
 # GitNexus 本地索引目录：目录内部自带 .gitignore（内容为 *），这里显式声明，避免换机器时误提交
 .gitnexus/
 
-# OpenWiki 本地运行时的瞬态状态文件（CI 里也会主动删除，不属于文档正文）
-openwiki/.run.json
+# 以下内容只在本地维护，暂不进仓库
+# .claude/  ：GitNexus 等工具生成的本地 skill 文件
+# .github/  ：CI workflow（注意：忽略后定时任务不会在 GitHub 上运行）
+# openwiki/ ：生成出来的文档索引，含 .run.json 等瞬态状态
+.claude/
+.github/
+openwiki/
+AGENTS.md
+CLAUDE.md
