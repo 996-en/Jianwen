@@ -1,15 +1,38 @@
+# 依赖与编译产物（加 / 前缀，只忽略根目录下的同名目录，避免误伤 src/dist 之类的同名源码目录）
 node_modules/
-dist/
-cache/
+/dist/
+
+# 运行时缓存：只忽略根目录的 cache/。
+# 注意不能写成 cache/，那样会连带忽略 src/cache/ 和 tests/cache/ 里的源码和测试
+/cache/
+
 # 本地 whisper.cpp 二进制与模型（约 2.2 GB，单文件最大 1.5 GB，超出 GitHub 单文件 100 MB 限制）
 # 只保留说明文档入库，二进制本身不入库
-Release/*
-!Release/README.md
+/Release/*
+!/Release/README.md
+
 *.log
+*.tsbuildinfo
+
+# 环境变量文件（保留示例文件，方便别人照着填）
 .env
+.env.*
+!.env.example
+
 # 浏览器 Cookie 导出文件，禁止入库
 *cookies*.txt
 cookies.txt
+
+# 系统与编辑器垃圾文件
 .DS_Store
+Thumbs.db
+desktop.ini
+
 coverage/
 .playwright-mcp/
+
+# GitNexus 本地索引目录：目录内部自带 .gitignore（内容为 *），这里显式声明，避免换机器时误提交
+.gitnexus/
+
+# OpenWiki 本地运行时的瞬态状态文件（CI 里也会主动删除，不属于文档正文）
+openwiki/.run.json
