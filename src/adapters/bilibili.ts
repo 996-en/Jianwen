@@ -5,31 +5,29 @@ import { bilibiliUserAgent } from "../config.js";
 import { VideoMcpError, type FetchAssetsOptions, type VideoRef } from "../types.js";
 import type { MediaFetchResult, PlatformAdapter } from "./types.js";
 import { fetchStoryboardFrames } from "./bilibili-storyboard.js";
+import {
+  AV_RE,
+  BV_RE,
+  extractShortLink,
+  parseBiliLink,
+  type BiliLink,
+} from "./bilibili-parse.js";
+import { fetchBilibiliTextMedia, resolveArticleRef, resolveDynamicRef } from "./bilibili-opus.js";
+import { assertPgcWatchable, fetchPgcPlayurl, resolveBangumiRef, resolveCheeseRef } from "./bilibili-pgc.js";
+import { isRateLimit } from "./bilibili-api.js";
 
-const BV_RE = /BV[0-9A-Za-z]{10}/;
-const AV_RE = /(?:av|AV)(\d+)/;
-const BILIBILI_HOST_RE =
-  /(?:https?:\/\/)?(?:www\.|m\.)?bilibili\.com\//i;
-const B23_RE = /(?:https?:\/\/)?b23\.tv\/[A-Za-z0-9]+/i;
+// 解析相关的纯函数搬到 bilibili-parse.ts，这里继续对外导出以保持调用方不变
+export {
+  extractAvId,
+  extractBvId,
+  extractShortLink,
+  isBilibiliInput,
+  parseBiliLink,
+} from "./bilibili-parse.js";
 
-export function extractBvId(input: string): string | null {
-  const m = input.match(BV_RE);
-  return m ? m[0] : null;
-}
-
-export function extractAvId(input: string): string | null {
-  const m = input.match(AV_RE);
-  return m ? m[1]! : null;
-}
-
-export function isBilibiliInput(input: string): boolean {
-  const s = input.trim();
-  if (BV_RE.test(s)) return true;
-  if (AV_RE.test(s)) return true;
-  if (BILIBILI_HOST_RE.test(s)) return true;
-  if (B23_RE.test(s)) return true;
-  return false;
-}
+/** 支持的类型，用在报错信息里 */
+const SUPPORTED_HINT =
+  "支持视频（BV/av、?p=N 分 P）、番剧（/bangumi/play/ep|ss|md）、课程（/cheese/play/ep|ss）、动态（/opus/<id>、t.bilibili.com/<id>）、专栏（/read/cv<id>）以及 b23.tv 短链";
 
 async function fetchText(url: string, init?: RequestInit): Promise<string> {
   const res = await fetch(url, {
@@ -55,20 +53,20 @@ async function fetchJson<T>(url: string): Promise<T> {
   return JSON.parse(text) as T;
 }
 
-/** 从输入（可能是整段分享文案）里取出 b23.tv 短链，补全 scheme */
-export function extractShortLink(input: string): string | null {
-  const m = input.match(B23_RE);
-  if (!m) return null;
-  return /^https?:\/\//i.test(m[0]) ? m[0] : `https://${m[0]}`;
-}
-
 /**
  * 跟随 b23.tv 短链到最终地址。先 manual 逐跳读 Location（分享文案跳转经常不止一跳），
- * 中途解析到 BV/av 就提前返回；拿不到 Location 的环节退回 follow 后取最终 URL。
+ * 中途解析到任何 B 站内容就提前返回；拿不到 Location 的环节退回 follow 后取最终 URL。
  */
-async function resolveShortLink(url: string): Promise<{ url: string; status: number }> {
+async function resolveShortLink(
+  url: string,
+): Promise<{ url: string; status: number; apiMessage?: string }> {
   let current = url;
   let status = 0;
+  const looksResolved = (candidate: string): boolean => {
+    const link = parseBiliLink(candidate);
+    return Boolean(link && link.kind !== "short" && link.kind !== "unknown");
+  };
+
   for (let hop = 0; hop < 5; hop += 1) {
     const res = await fetch(current, {
       method: "GET",
@@ -77,11 +75,18 @@ async function resolveShortLink(url: string): Promise<{ url: string; status: num
     });
     status = res.status;
     const location = res.headers.get("location");
-    if (!location) break;
+    if (!location) {
+      // 失效/不存在的短链不会 302，而是 HTTP 200 + {"code":-404,"message":"啥都木有"}；
+      // 非 JSON 的落地页（活动页/中转页）交给下面的 follow 兜底拿最终地址
+      const probed = await readShortLinkError(res);
+      if (probed.json) return { url: current, status, apiMessage: probed.message };
+      break;
+    }
+    await res.body?.cancel();
     current = new URL(location, current).toString();
-    if (BV_RE.test(current) || AV_RE.test(current)) return { url: current, status };
+    if (looksResolved(current)) return { url: current, status };
   }
-  if (BV_RE.test(current) || AV_RE.test(current)) return { url: current, status };
+  if (looksResolved(current)) return { url: current, status };
 
   // 有些网络环境下 redirect: manual 拿不到 Location，退回跟随重定向后解析最终 URL。
   const followed = await fetch(url, {
@@ -89,7 +94,29 @@ async function resolveShortLink(url: string): Promise<{ url: string; status: num
     redirect: "follow",
     headers: { "User-Agent": bilibiliUserAgent() },
   });
+  await followed.body?.cancel();
   return { url: followed.url, status: followed.status };
+}
+
+/** 短链没有跳转时，读一下 b23.tv 的 JSON 响应（失效短链：{"code":-404,"message":"啥都木有"}） */
+async function readShortLinkError(
+  res: Response,
+): Promise<{ json: boolean; message?: string }> {
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("json")) {
+    await res.body?.cancel();
+    return { json: false };
+  }
+  try {
+    const json = (await res.json()) as { code?: number; message?: string };
+    if (typeof json?.code === "number" && json.code !== 0) {
+      return { json: true, message: json.message || `code ${json.code}` };
+    }
+    return { json: true };
+  } catch {
+    // 不是合法 JSON 就当没识别到
+    return { json: false };
+  }
 }
 
 function commandExists(cmd: string): Promise<boolean> {
@@ -184,20 +211,27 @@ export class BilibiliAdapter implements PlatformAdapter {
   readonly platform = "bilibili";
 
   canHandle(input: string): boolean {
-    return isBilibiliInput(input);
+    return parseBiliLink(input) !== null;
   }
 
   async resolve(input: string): Promise<VideoRef> {
-    let raw = input.trim();
-    let shortLink: string | undefined;
-    let shortStatus: number | undefined;
-    const shortTarget = extractShortLink(raw);
-    if (shortTarget) {
-      shortLink = shortTarget;
+    const initial = parseBiliLink(input);
+    if (!initial) {
+      throw new VideoMcpError(
+        `Could not parse a Bilibili link or id from: ${input}`,
+        "UNSUPPORTED_URL",
+      );
+    }
+
+    let link = initial;
+    let source = input.trim();
+
+    // 短链：先跟到真正的页面，再按页面类型分派
+    if (link.kind === "short") {
+      const shortLink = extractShortLink(source)!;
+      let followed: { url: string; status: number; apiMessage?: string };
       try {
-        const followed = await resolveShortLink(shortTarget);
-        raw = followed.url;
-        shortStatus = followed.status;
+        followed = await resolveShortLink(shortLink);
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         throw new VideoMcpError(
@@ -205,23 +239,67 @@ export class BilibiliAdapter implements PlatformAdapter {
           "UNSUPPORTED_URL",
         );
       }
+      // 失效短链：b23.tv 返回 200 + {"code":-404,"message":"啥都木有"}，没有跳转
+      if (followed.apiMessage) {
+        throw new VideoMcpError(
+          `B 站短链 ${shortLink} 已失效或不存在（b23.tv：${followed.apiMessage}），请在 App 里重新复制分享链接`,
+          "NOT_FOUND",
+        );
+      }
+      const target = parseBiliLink(followed.url);
+      if (!target || target.kind === "short" || target.kind === "unknown") {
+        throw new VideoMcpError(
+          `Bilibili short link ${shortLink} led to ${followed.url}, which is not a video page or other supported content page (HTTP ${followed.status}). ${SUPPORTED_HINT}`,
+          "UNSUPPORTED_URL",
+        );
+      }
+      link = target;
+      source = followed.url;
     }
 
-    let bvid = extractBvId(raw);
-    const avid = extractAvId(raw);
+    switch (link.kind) {
+      case "video":
+        return this.resolveVideo(source, link);
+      case "bangumi":
+        return resolveBangumiRef(link);
+      case "cheese":
+        return resolveCheeseRef(link);
+      case "opus":
+        // 动态可能只是壳：投稿视频动态要跳到背后的视频
+        return resolveDynamicRef(link.id, (bvid) =>
+          this.resolveVideo(`https://www.bilibili.com/video/${bvid}`, {
+            kind: "video",
+            id: bvid,
+            page: 1,
+          }),
+        );
+      case "article":
+        return resolveArticleRef(link.id);
+      case "audio":
+        throw new VideoMcpError(
+          `B 站音频区（au）暂不支持，请提供视频、番剧、课程、动态或专栏链接。${SUPPORTED_HINT}`,
+          "UNSUPPORTED_URL",
+        );
+      default:
+        throw new VideoMcpError(
+          `这条 bilibili.com 链接的类型暂不支持（直播、收藏夹、合集、UP 主空间等）。${SUPPORTED_HINT}`,
+          "UNSUPPORTED_URL",
+        );
+    }
+  }
 
-    let apiUrl: string;
-    if (bvid) {
-      apiUrl = `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`;
-    } else if (avid) {
-      apiUrl = `https://api.bilibili.com/x/web-interface/view?aid=${encodeURIComponent(avid)}`;
-    } else {
+  /** 普通投稿视频：按 ?p=N 选分 P */
+  private async resolveVideo(raw: string, link: BiliLink): Promise<VideoRef> {
+    const bvidFromLink = link.id.startsWith("av") ? null : link.id;
+    const avid = link.id.startsWith("av") ? link.id.slice(2) : null;
+
+    const apiUrl = bvidFromLink
+      ? `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvidFromLink)}`
+      : `https://api.bilibili.com/x/web-interface/view?aid=${encodeURIComponent(avid ?? "")}`;
+
+    if (!bvidFromLink && !avid) {
       throw new VideoMcpError(
-        shortLink === undefined
-          ? `Could not parse a Bilibili BV/av id from: ${input}`
-          : raw === shortLink
-            ? `Bilibili short link ${shortLink} did not redirect to a video page (HTTP ${shortStatus ?? 0}, no BV/av id to resolve).`
-            : `Bilibili short link ${shortLink} led to ${raw}, which is not a video page (HTTP ${shortStatus ?? 0}, no BV/av id to resolve).`,
+        `Could not parse a Bilibili BV/av id from: ${raw}`,
         "UNSUPPORTED_URL",
       );
     }
@@ -235,6 +313,9 @@ export class BilibiliAdapter implements PlatformAdapter {
     }
     if (json.code !== 0 || !json.data) {
       const msg = json.message || `code ${json.code}`;
+      if (isRateLimit(json.code, msg)) {
+        throw new VideoMcpError(`B 站限流（${json.code}：${msg}），请等几十秒后重试`, "DOWNLOAD_FAILED");
+      }
       if (/登录|login|会员|大会员|pay/i.test(msg)) {
         throw new VideoMcpError(
           `VIP or login required (v1 has no cookies): ${msg}`,
@@ -252,14 +333,39 @@ export class BilibiliAdapter implements PlatformAdapter {
       );
     }
 
-    bvid = d.bvid;
-    const page = d.pages?.[0];
+    const bvid = d.bvid;
+    const pages = d.pages ?? [];
+    const pageCount = pages.length;
+    // ?p= 越界时夹到最后一 P，避免 cid 为 undefined
+    const pageIndex = pageCount > 0 ? Math.min(Math.max(link.page, 1), pageCount) - 1 : 0;
+    const page = pages[pageIndex];
+    const pageNumber = page?.page ?? 1;
     const durationSec = page?.duration ?? d.duration ?? 0;
+    const multiPage = pageCount > 1;
+
+    const title =
+      multiPage && (page?.part ?? "").trim() && (page?.part ?? "").trim() !== d.title.trim()
+        ? `${d.title} · P${pageNumber} ${(page?.part ?? "").trim()}`
+        : multiPage
+          ? `${d.title} · P${pageNumber}`
+          : d.title;
+
+    const extras: Record<string, string | number | boolean | null> = {
+      aid: d.aid,
+      cid: page?.cid ?? 0,
+    };
+    // 单 P 视频保持 extras 原样（{aid, cid}），多 P 才补充分 P 信息
+    if (multiPage) {
+      extras.bvid = bvid;
+      extras.page = pageNumber;
+      extras.pageCount = pageCount;
+    }
 
     return {
       platform: "bilibili",
-      id: bvid,
-      title: d.title,
+      // 多 P 时把 P 号写进 id，避免不同分 P 共用同一个缓存目录
+      id: multiPage ? `${bvid}_p${pageNumber}` : bvid,
+      title,
       durationSec,
       author: d.owner?.name ?? "unknown",
       authorId: d.owner?.mid,
@@ -275,11 +381,8 @@ export class BilibiliAdapter implements PlatformAdapter {
         coins: d.stat.coin,
         danmaku: d.stat.danmaku,
       } : undefined,
-      pageUrl: `https://www.bilibili.com/video/${bvid}`,
-      extras: {
-        aid: d.aid,
-        cid: page?.cid ?? 0,
-      },
+      pageUrl: `https://www.bilibili.com/video/${bvid}${multiPage && pageNumber > 1 ? `?p=${pageNumber}` : ""}`,
+      extras,
     };
   }
 
@@ -289,12 +392,22 @@ export class BilibiliAdapter implements PlatformAdapter {
     options?: FetchAssetsOptions,
   ): Promise<MediaFetchResult> {
     await fs.mkdir(destDir, { recursive: true });
+    const kind = String(ref.extras?.kind ?? "video");
+
+    // 动态与专栏是图文：写 article.md，不进入 ffmpeg / ASR
+    if (kind === "opus" || kind === "article") {
+      return fetchBilibiliTextMedia(ref, destDir, options);
+    }
+
+    // 会员集/未购课程：先失败，避免故事板、yt-dlp 或 playurl 把 180 秒试看当成正片
+    if (kind === "bangumi" || kind === "cheese") assertPgcWatchable(ref);
+
     const result: MediaFetchResult = {};
 
     const aid = Number(ref.extras?.aid ?? 0);
     const cid = Number(ref.extras?.cid ?? 0);
 
-    // Subtitles via player API
+    // Subtitles via player API（番剧/课程同样适用，PGC 多数没有字幕，失败不影响）
     if (options?.wantSubtitles !== false && cid) {
       try {
         const playerUrl = `https://api.bilibili.com/x/player/v2?aid=${aid}&cid=${cid}`;
@@ -337,8 +450,10 @@ export class BilibiliAdapter implements PlatformAdapter {
 
     // 只有 ASR 需要媒体时，优先下载音频轨，不下载整段视频。
     const audioOnly = needAudio && !needVideo;
+    const isPgc = kind === "bangumi" || kind === "cheese";
+    let ytDlpError: string | undefined;
 
-    // Prefer yt-dlp when present
+    // Prefer yt-dlp when present（对番剧/课程也先试一次，失败再走 playurl）
     const hasYtDlp = await commandExists("yt-dlp");
     if (hasYtDlp) {
       try {
@@ -388,16 +503,41 @@ export class BilibiliAdapter implements PlatformAdapter {
             // ignore
           }
         }
-        return result;
+        if (result.audioPath || result.videoPath) return result;
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (/login|cookie|premium|会员|付费/i.test(msg)) {
+        ytDlpError = err instanceof Error ? err.message : String(err);
+        // 付费番剧：yt-dlp 会报登录/会员，此时不立刻失败，先试公开 playurl
+        if (!isPgc && /login|cookie|premium|会员|付费/i.test(ytDlpError)) {
           throw new VideoMcpError(
-            `Download blocked (login/VIP). Install cookies support later or use a public video. Detail: ${msg}`,
+            `Download blocked (login/VIP). Install cookies support later or use a public video. Detail: ${ytDlpError}`,
             "VIP_OR_LOGIN",
           );
         }
-        // Fall through to HTTP playurl
+      }
+    }
+
+    // 番剧与课程：公开 playurl（未购买/大会员会抛 VIP_OR_LOGIN）
+    if (isPgc) {
+      try {
+        const playurl = await fetchPgcPlayurl(ref);
+        if (playurl.audioUrl) {
+          const audioPath = path.join(destDir, "audio.m4s");
+          await downloadBinary(playurl.audioUrl, audioPath);
+          result.audioPath = audioPath;
+        }
+        if (playurl.videoUrl && (needVideo || (needAudio && !playurl.audioUrl))) {
+          const videoPath = path.join(destDir, "video.m4s");
+          await downloadBinary(playurl.videoUrl, videoPath);
+          result.videoPath = videoPath;
+        }
+        return result;
+      } catch (err) {
+        if (err instanceof VideoMcpError) throw err;
+        const reason = err instanceof Error ? err.message : String(err);
+        throw new VideoMcpError(
+          `Failed to download PGC media: ${reason}${ytDlpError ? ` (yt-dlp: ${ytDlpError.slice(-300)})` : ""}`,
+          "DOWNLOAD_FAILED",
+        );
       }
     }
 

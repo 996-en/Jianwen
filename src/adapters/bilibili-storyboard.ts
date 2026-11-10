@@ -36,7 +36,9 @@ export async function fetchStoryboardFrames(
   const cid = Number(ref.extras?.cid ?? 0);
   if (!Number.isSafeInteger(cid) || cid <= 0) throw new Error("Missing video cid");
 
-  const api = `https://api.bilibili.com/x/player/videoshot?bvid=${encodeURIComponent(ref.id)}&cid=${cid}&index=1`;
+  // 多 P 视频的 ref.id 形如 BV1xx_p2，真正的 bvid 记在 extras.bvid 里
+  const bvid = String(ref.extras?.bvid ?? ref.id);
+  const api = `https://api.bilibili.com/x/player/videoshot?bvid=${encodeURIComponent(bvid)}&cid=${cid}&index=1`;
   const headers = {
     "User-Agent": bilibiliUserAgent(),
     Referer: "https://www.bilibili.com/",

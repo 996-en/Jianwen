@@ -10,7 +10,7 @@
 
 | MCP 工具 | 作用 |
 | --- | --- |
-| `resolve_video` | 解析 B 站链接、`b23.tv` 短链、BV／av 号，返回标题、首 P 时长、作者／UID、发布时间、互动数及 `aid`/`cid`；也解析抖音作品链接、`v.douyin.com` 分享链接或 aweme id，返回标题、时长、作者、发布时间与互动数；还解析微信文章短链／长链，返回标题、公众号、作者、发布时间、正文与图片地址。 |
+| `resolve_video` | 解析 B 站视频链接（`?p=N` 指定分 P）、`b23.tv` 短链、BV／av 号，返回标题、时长、作者／UID、发布时间、互动数及 `aid`/`cid`；也解析 B 站番剧（`/bangumi/play/ep|ss|md`）、课程（`/cheese/play/ep|ss`）、动态（`/opus/<id>`、`t.bilibili.com/<id>`）与专栏（`/read/cv<id>`），返回元数据、正文与图片地址；还解析抖音作品链接、`v.douyin.com` 分享链接或 aweme id，返回标题、时长、作者、发布时间与互动数；还解析微信文章短链／长链，返回标题、公众号、作者、发布时间、正文与图片地址。 |
 | `fetch_assets` | 获取字幕，按需进行语音转写或抽取关键帧，写入本地 `AssetManifest`。默认只取文字，需要画面必须显式要帧；微信文章写 `article.md`／`article.html`，按需下载正文图片。 |
 | `get_cached` | 读取已有缓存清单，不重复下载媒体。 |
 | `summarize` | 可选：将已有文字与最多六张关键帧发送到配置好的 OpenAI 兼容聊天／视觉 API，生成结构化摘要。 |
@@ -19,11 +19,13 @@
 
 ### B 站数据从哪里来
 
-1. `resolve_video` 使用 B 站网页接口 `GET https://api.bilibili.com/x/web-interface/view?bvid=BV...`（也支持 `aid=...`）。`publishedAt` 转为 UTC ISO 8601；`stats.comments` 对应 `stat.reply`，只是当次请求的数量快照。多 P 视频目前只处理**第一 P** 的 `cid` 与时长。
-2. 请求字幕时读取播放器接口；有可用平台字幕时即使开着 ASR 也会**优先使用字幕**，跳过语音识别。不少视频并没有开放字幕，此时只有配置了 ASR provider 才会得到文字。
-3. 画面优先从 B 站视频快照雪碧图中裁剪**最多六张**关键帧，覆盖视频前约 90%，不必下载整段视频；故事板不可用才回退到媒体下载 + ffmpeg 按间隔抽帧。后者生成的帧数可能超过六张。
-4. 显式请求 ASR 且没有取到字幕时，优先只下载音轨（`yt-dlp`，失败时尝试公开 playurl），用 ffmpeg 转成单声道 16 kHz WAV，然后调用本地 whisper.cpp；也可明确配置兼容 API 进行云端转写。没有独立音轨时可能下载视频。
-5. 本地 whisper.cpp 的转写在写入前会做后处理：用 OpenCC 把繁体统一成简体，去掉背景音乐导致的连续重复段，再把分段按停顿或字数上限合并成段落，而不是一句一行。带时间戳的原始分段保留在同目录的 `asr.json`。
+1. `resolve_video` 使用 B 站网页接口 `GET https://api.bilibili.com/x/web-interface/view?bvid=BV...`（也支持 `aid=...`）。`publishedAt` 转为 UTC ISO 8601；`stats.comments` 对应 `stat.reply`，只是当次请求的数量快照。`?p=N` 指定分 P；不传时用第一 P 的 `cid` 与时长。多 P 视频的 `id` 会变成 `BV..._p2` 这类形式，避免不同分 P 共用一个缓存目录。
+2. 番剧用 `pgc/view/web/season` + `pgc/player/web/playurl`；课程用 `pugv/view/web/season` + `pugv/player/web/playurl`。需要购买、未登录或地区受限的剧集会在下载前返回 `VIP_OR_LOGIN`。
+3. 动态（`/opus/<id>`、`t.bilibili.com/<id>`）与专栏（`/read/cv<id>`）是图文，不是视频：前者走 `opus/detail`，后者走 `article/view`。图片、转发这类动态 `opus/detail` 会返回空 item，此时改问 `web-dynamic/v1/detail`：投稿视频动态直接切换到背后的视频（`extras.fromDynamic` 记下来源动态），专栏卡转成 `cv<id>`，转发动态会把原动态正文补进正文。专栏接口需要匿名 `buvid3`/`buvid4` Cookie，会按需向 `x/frontend/finger/spi` 申请。`fetch_assets` 对图文类只写 `article.md`（含 `images/`），不做 ASR、不抽帧。
+4. 请求字幕时读取播放器接口；有可用平台字幕时即使开着 ASR 也会**优先使用字幕**，跳过语音识别。不少视频并没有开放字幕，此时只有配置了 ASR provider 才会得到文字。
+5. 画面优先从 B 站视频快照雪碧图中裁剪**最多六张**关键帧，覆盖视频前约 90%，不必下载整段视频；故事板不可用才回退到媒体下载 + ffmpeg 按间隔抽帧。后者生成的帧数可能超过六张。
+6. 显式请求 ASR 且没有取到字幕时，优先只下载音轨（`yt-dlp`，失败时尝试公开 playurl），用 ffmpeg 转成单声道 16 kHz WAV，然后调用本地 whisper.cpp；也可明确配置兼容 API 进行云端转写。没有独立音轨时可能下载视频。
+7. 本地 whisper.cpp 的转写在写入前会做后处理：用 OpenCC 把繁体统一成简体，去掉背景音乐导致的连续重复段，再把分段按停顿或字数上限合并成段落，而不是一句一行。带时间戳的原始分段保留在同目录的 `asr.json`。
 
 `fetch_assets` 默认 `wantSubtitles: true`、`wantKeyframes: false`、`keyframeIntervalSec: 10`，所以**不传参就是“只要文字”**：平台字幕或转写稿，绝不会为了截帧去下载整片视频。`wantAsr` 在配置了 `VIDEO_MCP_ASR_PROVIDER` 时**自动开启**（有了平台字幕会自动跳过），显式传 `false` 才会关闭。需要看画面时传 `wantKeyframes: true`；B 站会用故事板雪碧图裁切，不下载视频，抖音没有故事板则会下整片 mp4（抽完默认删除，`VIDEO_MCP_KEEP_MEDIA=1` 可保留）。故事板图是预览缩略图而不是原视频高清帧，模型结论与 ASR 内容应对照原视频核查。
 
@@ -90,8 +92,13 @@ src/                         正式代码，`npm run build` 只编译这里（�
     registry.ts              注册表：findAdapter(用户输入) 按顺序挑适配器，
                              adapterByPlatform(平台名) 给缓存复用
     bilibili.ts              B 站：URL/BV/av 识别、view + player 元数据、字幕、下载
+    bilibili-parse.ts        B 站链接分类：视频／番剧／课程／动态／专栏／音频／b23 短链（纯函数、不联网）
+    bilibili-api.ts          B 站取数：带匿名 buvid Cookie、风控码退避重试
+    bilibili-opus.ts         B 站动态与专栏：正文、图片、内嵌视频卡片
+    bilibili-pgc.ts          B 站番剧与课程：季信息、单集、playurl
     bilibili-storyboard.ts   B 站故事板：videoshot 雪碧图接口 + sharp 裁帧；失败时由
                              bilibili.ts 降级为下载整段视频
+    article-html.ts          图文平台共用的 HTML → 文本/markdown/图片工具
     douyin.ts                抖音：短链跳转、Cookie 会话、签名后的详情请求、媒体候选下载
     douyin-sign.ts           抖音 query 签名 x-secsdk-web-signature 与固定网页端参数（纯函数）
     weixin.ts                微信公众号图文：URL 识别、HTML 标题/正文/图片解析、chksm 兜底、
@@ -107,6 +114,9 @@ src/                         正式代码，`npm run build` 只编译这里（�
 tests/                       测试，与 src/ 同构镜像；`npm test` 跑这里，不进入 dist
   config.test.ts             默认路径与环境变量优先级（含默认抖音 Cookie 文件）
   adapters/bilibili.test.ts  B 站输入解析、元数据、字幕、下载（mock fetch）
+  adapters/bilibili-parse.test.ts  链接分类：哪种链接被认成哪类内容
+  adapters/bilibili-opus.test.ts   动态/专栏解析：正文、图片、视频卡片
+  adapters/bilibili-pgc.test.ts    番剧/课程元数据与 playurl 错误码映射
   adapters/bilibili-storyboard.test.ts  故事板裁帧与降级路径
   adapters/douyin.test.ts    抖音输入识别、Cookie 文件解析、resolve 字段映射、错误码、
                              媒体候选（mock fetch）
@@ -254,7 +264,7 @@ fetch_assets   { "id": "22eec806d6a5608c3c65dfc32200d676", "wantKeyframes": true
 - **没有关键帧：**故事板可能不可用；回退抽帧要求能下载媒体、能执行 ffmpeg，通常建议安装 yt-dlp。暂不支持登录态、Cookie、大会员或付费视频。
 - **缓存未命中：**先调用 `fetch_assets`；`get_cached` 才能读取。旧缓存的互动数据不会自动刷新。
 - **长任务中断：**要看客户端自身的请求超时；单独增大 `asrTimeoutSec` 并不能改变客户端超时。Pi 修改 MCP 配置后可能需要 `/reload`。
-- **平台范围：**`src/adapters/registry.ts` 注册了 B 站、抖音与微信。抖音依赖浏览器访客 Cookie 与自行计算的签名；未配置 `VIDEO_MCP_DOUYIN_COOKIE_FILE` 时返回 `COOKIE_REQUIRED`。抖音返回 **HTTP 200 但响应体为空**时属于软风控／作品不可见，应刷新 Cookie，不要循环重试。图文作品（`/note/`）不支持。微信短链通常可直接读取；长链在没有有效 `chksm` 时返回 `WEIXIN_CAPTCHA`。已注销/删除/作者隐私设置不可见/违规下架的文章返回 `NOT_FOUND` 并说明原因。微信视频号暂不支持；三个平台的接口、Cookie 与签名机制完全不同，各自单独实现适配器。
+- **平台范围：**`src/adapters/registry.ts` 注册了 B 站、抖音与微信。B 站支持的链接类型：视频（含 `?p=N` 分 P）、番剧（`/bangumi/play/ep|ss|md`）、课程（`/cheese/play/ep|ss`）、动态/opus、专栏、`b23.tv` 短链；音频区（`/audio/au<id>`）、直播、收藏夹、合集、UP 主空间**暂不支持**，会返回 `UNSUPPORTED_URL` 并列出支持范围。抖音依赖浏览器访客 Cookie 与自行计算的签名；未配置 `VIDEO_MCP_DOUYIN_COOKIE_FILE` 时返回 `COOKIE_REQUIRED`。抖音返回 **HTTP 200 但响应体为空**时属于软风控／作品不可见，应刷新 Cookie，不要循环重试。图文作品（`/note/`）不支持。微信短链通常可直接读取；长链在没有有效 `chksm` 时返回 `WEIXIN_CAPTCHA`。已注销/删除/作者隐私设置不可见/违规下架的文章返回 `NOT_FOUND` 并说明原因。微信视频号暂不支持；三个平台的接口、Cookie 与签名机制完全不同，各自单独实现适配器。
 
 扩展平台需在 `src/adapters/` 实现 `PlatformAdapter` 并于 `src/adapters/registry.ts` 注册，变更后运行 `npm test`、`npm run build`。Windows Cursor 详细安装另见 [INSTALL_CN.md](INSTALL_CN.md)。
 

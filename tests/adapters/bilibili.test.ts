@@ -145,6 +145,32 @@ describe("BilibiliAdapter.resolve", () => {
     }
   });
 
+  it("失效短链（200 + 错误 JSON）报已失效，而不是“led to”", async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ code: -404, message: "啥都木有" }), {
+        status: 200,
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
+    };
+    try {
+      await assert.rejects(
+        () => new BilibiliAdapter().resolve("https://b23.tv/pigt3PQ"),
+        (err: unknown) => {
+          assert.equal((err as { code?: string }).code, "NOT_FOUND");
+          assert.match((err as Error).message, /已失效或不存在/);
+          assert.match((err as Error).message, /啥都木有/);
+          return true;
+        },
+      );
+      assert.equal(calls, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("分享文案里的短链只请求链接本身，不拿整段文字当 URL", async () => {
     const originalFetch = globalThis.fetch;
     const requested: string[] = [];

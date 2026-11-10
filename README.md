@@ -10,7 +10,7 @@ The name is platform-neutral; **Bilibili, Douyin, and Weixin public-account arti
 
 | MCP tool | Result |
 | --- | --- |
-| `resolve_video` | Resolve a Bilibili URL, `b23.tv` short link, BV ID, or av ID to title, first-page duration, author/UID, publication time, engagement counts, and `aid`/`cid`. Also resolves a Douyin video URL, `v.douyin.com` share link, or aweme id to title, duration, author, publication time and interaction counts. Also resolves a Weixin article URL (`mp.weixin.qq.com/s/<id>` or `mp.weixin.qq.com/s?__biz=...`) to title, account, author, publication time, body text and image URLs. |
+| `resolve_video` | Resolve a Bilibili video URL (`?p=N` selects a part), `b23.tv` short link, BV ID, or av ID to title, duration, author/UID, publication time, engagement counts, and `aid`/`cid`. Also resolves Bilibili bangumi (`/bangumi/play/ep|ss|md`) and course (`/cheese/play/ep|ss`) episodes, dynamics/opus (`/opus/<id>`, `t.bilibili.com/<id>`) and columns (`/read/cv<id>`) to metadata plus body text and image URLs. Also resolves a Douyin video URL, `v.douyin.com` share link, or aweme id to title, duration, author, publication time and interaction counts. Also resolves a Weixin article URL (`mp.weixin.qq.com/s/<id>` or `mp.weixin.qq.com/s?__biz=...`) to title, account, author, publication time, body text and image URLs. |
 | `fetch_assets` | Fetch available subtitles, optionally transcribe speech and/or extract keyframes; save an `AssetManifest` and local files. Text only by default; frames must be asked for. For Weixin articles, writes `article.md` / `article.html` and optionally downloads article images. |
 | `get_cached` | Read a previously saved manifest without re-downloading its media. |
 | `summarize` | Optionally send cached text and up to six frames to a configured OpenAI-compatible chat/vision endpoint for a structured summary. |
@@ -19,11 +19,13 @@ The workflow is **resolve → fetch → analyze**: the client may analyze the re
 
 ### How Bilibili assets are obtained
 
-1. Video metadata comes from Bilibili's web endpoint `GET https://api.bilibili.com/x/web-interface/view?bvid=BV...` (or `aid=...`). `publishedAt` is UTC ISO 8601; `stats.comments` maps to `stat.reply` (a count). Stats are snapshots taken at request time, not live counters. Multi-part videos currently use **the first page's** `cid` and duration.
-2. When requested, subtitles come from the player API. If subtitles are available, requesting ASR skips transcription. Many videos have no exposed subtitles.
-3. Keyframes first come from the videoshot storyboard: the server crops **up to six** tiles across the first 90% of the video without downloading the whole video. If unavailable, it downloads media and uses ffmpeg to sample frames; this fallback can produce more than six frames depending on the interval.
-4. When ASR is explicitly requested and no subtitle was found, it prefers an audio-only stream via `yt-dlp` (or Bilibili's playurl fallback), converts audio to mono 16 kHz WAV with ffmpeg, then runs local whisper.cpp or sends audio to an explicitly configured compatible ASR API. If an audio stream is unavailable, it may download video instead.
-5. Local whisper.cpp output is post-processed before it is written: Traditional Chinese is converted to Simplified with OpenCC, consecutive segments repeated by background music are collapsed, and segments are merged into paragraphs at pauses or at a character limit instead of one line per segment. The timestamped raw segments stay next to `asr.txt` as `asr.json`.
+1. Video metadata comes from Bilibili's web endpoint `GET https://api.bilibili.com/x/web-interface/view?bvid=BV...` (or `aid=...`). `publishedAt` is UTC ISO 8601; `stats.comments` maps to `stat.reply` (a count). Stats are snapshots taken at request time, not live counters. `?p=N` selects a part; without it the first page's `cid` and duration are used. Multi-part refs get an id like `BV..._p2` so different parts never share one cache directory.
+2. Bangumi episodes/seasons use `pgc/view/web/season` + `pgc/player/web/playurl`; courses use `pugv/view/web/season` + `pugv/player/web/playurl`. Paid, purchase-only or region-locked episodes fail with `VIP_OR_LOGIN` before any download starts.
+3. Dynamics (`/opus/<id>`, `t.bilibili.com/<id>`) and columns (`/read/cv<id>`) are text, not video: `opus/detail` and `article/view`. Image and forwarded posts have an empty `item` in `opus/detail`, so the adapter falls back to `web-dynamic/v1/detail`: a video post resolves to the video it points at (`extras.fromDynamic` records the source post), a column card becomes `cv<id>`, and a forwarded post gets the original post's body text appended. The column endpoint needs an anonymous `buvid3`/`buvid4` cookie, fetched from `x/frontend/finger/spi` on demand. `fetch_assets` writes `article.md` (plus `images/`) for text content and skips ASR and frame extraction.
+4. When requested, subtitles come from the player API. If subtitles are available, requesting ASR skips transcription. Many videos have no exposed subtitles.
+5. Keyframes first come from the videoshot storyboard: the server crops **up to six** tiles across the first 90% of the video without downloading the whole video. If unavailable, it downloads media and uses ffmpeg to sample frames; this fallback can produce more than six frames depending on the interval.
+6. When ASR is explicitly requested and no subtitle was found, it prefers an audio-only stream via `yt-dlp` (or Bilibili's playurl fallback), converts audio to mono 16 kHz WAV with ffmpeg, then runs local whisper.cpp or sends audio to an explicitly configured compatible ASR API. If an audio stream is unavailable, it may download video instead.
+7. Local whisper.cpp output is post-processed before it is written: Traditional Chinese is converted to Simplified with OpenCC, consecutive segments repeated by background music are collapsed, and segments are merged into paragraphs at pauses or at a character limit instead of one line per segment. The timestamped raw segments stay next to `asr.txt` as `asr.json`.
 
 Default `fetch_assets` options are `wantSubtitles: true`, `wantKeyframes: false`, and `keyframeIntervalSec: 10`, so an optionless call returns **text only** — platform subtitles, or a transcript — and never downloads a video just to sample it. `wantAsr` is **on by default whenever `VIDEO_MCP_ASR_PROVIDER` is configured** (it is skipped automatically when the platform already provides subtitles) and only an explicit `false` turns it off. Pass `wantKeyframes: true` when the model needs to see the picture; storyboard tiles are then cropped without downloading the video (Douyin has no storyboard, so it downloads the mp4), and after extraction or transcription that mp4 is deleted unless `VIDEO_MCP_KEEP_MEDIA=1`. Storyboard frames are thumbnails, not full-resolution frames; AI-generated interpretations and ASR text should be checked against the source.
 
@@ -90,8 +92,14 @@ src/                         production code; `npm run build` compiles only this
     registry.ts              registry: findAdapter(input) picks an adapter in order,
                              adapterByPlatform(name) serves cache reuse
     bilibili.ts              Bilibili: URL/BV/av parsing, view + player metadata, subtitles, download
+    bilibili-parse.ts        Bilibili link classifier: video / bangumi / cheese / opus / column /
+                             audio / b23 short link (pure, offline)
+    bilibili-api.ts          Bilibili JSON fetch with anonymous buvid cookie and risk-control retry
+    bilibili-opus.ts         Bilibili dynamics and columns: body text, images, video cards
+    bilibili-pgc.ts          Bilibili bangumi and course seasons, episodes, playurl
     bilibili-storyboard.ts   Bilibili storyboard: videoshot sprite API + sharp cropping;
                              bilibili.ts falls back to downloading the whole video if it fails
+    article-html.ts          shared HTML → text/markdown/image helpers for text platforms
     douyin.ts                Douyin: short-link resolution, cookie session, signed detail request,
                              media candidate download
     douyin-sign.ts           Douyin query signature x-secsdk-web-signature and the fixed web
@@ -109,6 +117,9 @@ src/                         production code; `npm run build` compiles only this
 tests/                       tests mirroring src/; `npm test` runs these, never built into dist
   config.test.ts             default paths and env precedence (including the default Douyin cookie file)
   adapters/bilibili.test.ts  Bilibili parsing, metadata, subtitles, download (mocked fetch)
+  adapters/bilibili-parse.test.ts  link classifier: which URL becomes which kind of ref
+  adapters/bilibili-opus.test.ts   dynamics/opus and column parsing (text, images, cards)
+  adapters/bilibili-pgc.test.ts    bangumi/course metadata and playurl error mapping
   adapters/bilibili-storyboard.test.ts  storyboard cropping and the fallback path
   adapters/douyin.test.ts    Douyin input detection, cookie file parsing, resolve field mapping,
                              error codes, media candidates (mocked fetch)
@@ -257,7 +268,7 @@ On the maintainer's test machine, the example BV above yielded a local transcrip
 - **No frames?** Storyboard may be unavailable; the fallback needs media access, ffmpeg, and sometimes yt-dlp. Paywalled, VIP, or login-only material is unsupported; the server does not use cookies.
 - **No cache?** `get_cached` returns `CACHE_MISS` until `fetch_assets` has written a manifest. A cached manifest does not update its engagement counts automatically.
 - **Long operations?** Raise the client's request timeout as needed; the Whisper timeout override alone does not extend it. A freshly edited Pi MCP config may require `/reload`.
-- **Platform scope:** `src/adapters/registry.ts` registers Bilibili, Douyin and Weixin. Douyin needs browser guest cookies plus a signed detail query; without `VIDEO_MCP_DOUYIN_COOKIE_FILE` it fails with `COOKIE_REQUIRED`. A `200` response with an **empty body** is Douyin's soft rate-limit / not-visible signal — refresh the cookies instead of retrying in a loop. Image posts (`/note/`) are unsupported. Weixin short links usually work; long links may return `WEIXIN_CAPTCHA` when no valid `chksm` is available. Cancelled/deleted/author-privacy-hidden/takedown articles return `NOT_FOUND` with the reason. Weixin Channels (视频号) videos are not supported. Bilibili's authorized APIs, Douyin's signed web endpoints, and Weixin's article pages differ, so each platform keeps its own adapter.
+- **Platform scope:** `src/adapters/registry.ts` registers Bilibili, Douyin and Weixin. Douyin needs browser guest cookies plus a signed detail query; without `VIDEO_MCP_DOUYIN_COOKIE_FILE` it fails with `COOKIE_REQUIRED`. A `200` response with an **empty body** is Douyin's soft rate-limit / not-visible signal — refresh the cookies instead of retrying in a loop. Image posts (`/note/`) are unsupported. Weixin short links usually work; long links may return `WEIXIN_CAPTCHA` when no valid `chksm` is available. Cancelled/deleted/author-privacy-hidden/takedown articles return `NOT_FOUND` with the reason. Weixin Channels (视频号) videos are not supported. Bilibili's authorized APIs, Douyin's signed web endpoints, and Weixin's article pages differ, so each platform keeps its own adapter. Bilibili supported link types: videos (with `?p=N`), bangumi episodes/seasons (`/bangumi/play/...`), courses (`/cheese/play/...`), dynamics/opus, columns, and `b23.tv` short links. Audio (`/audio/au<id>`), live rooms, favourites, collections and UP space pages are **not** supported yet; they fail with `UNSUPPORTED_URL` listing the supported types.
 
 To add another platform, implement `PlatformAdapter` in `src/adapters/` and register it in `src/adapters/registry.ts`. Run `npm test` and `npm run build` after changes. For a more detailed Chinese walkthrough, see [README.zh-CN.md](README.zh-CN.md) and [Windows Cursor setup](INSTALL_CN.md).
 
