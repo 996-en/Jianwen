@@ -31,7 +31,8 @@ export async function summarizeManifest(
     );
   }
 
-  // 公众号文章没有字幕/ASR，但 articleText 就是完整正文；视频仍按原优先级。
+  // 图文/长文没有字幕/ASR，但 articleText 就是完整正文；视频仍按原优先级。
+  // 抖音图文只有文案，真正的信息在图片里，而图片只在 wantKeyframes 时才缓存。
   const isArticle = Boolean(manifest.articleText || manifest.articlePath);
   const transcript =
     manifest.articleText ||
@@ -51,7 +52,7 @@ export async function summarizeManifest(
       : "No keyframes cached.";
 
   const system = isArticle
-    ? `You are a careful article analyst. Given a Weixin public-account article and its metadata, produce a structured Chinese or English summary (match the article language) as JSON with keys: chapters (array of {heading, points[]}), keyPoints (string[]), conclusion (string).`
+    ? `You are a careful article analyst. Given the text of an article or text post (Weixin public-account article, Bilibili dynamic/column, Douyin long article, or the caption of a Douyin image post) and its metadata, produce a structured Chinese or English summary (match the article language) as JSON with keys: chapters (array of {heading, points[]}), keyPoints (string[]), conclusion (string). When the text is only a short caption and images are not available, say so in the conclusion instead of inventing content.`
     : `You are a careful video analyst. Given a transcript and metadata from a video, produce a structured Chinese or English summary (match the transcript language) as JSON with keys: chapters (array of {heading, points[]}), keyPoints (string[]), conclusion (string).`;
 
   const user = [

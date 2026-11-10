@@ -49,13 +49,17 @@ export interface AssetManifest {
   audioPath?: string;
   videoPath?: string;
   keyframePaths?: string[];
-  /** 微信公众号文章正文纯文本 */
+  /** 公众号文章正文纯文本（含 B 站动态/专栏、抖音长文/图文） */
   articleText?: string;
-  /** 微信公众号文章 Markdown 文件 */
+  /** 正文 Markdown 文件（标题 + 元信息 + 正文 + 图片清单） */
   articlePath?: string;
-  /** 微信公众号文章原始 HTML 文件 */
+  /** 原始 HTML 文件（仅微信公众号、B 站专栏这类有 HTML 的平台） */
   articleHtmlPath?: string;
-  /** 微信公众号正文图片的本地路径（仅 wantKeyframes=true 时下载） */
+  /** 原始 Markdown 文件（抖音长文的 article_info.markdown 原样保存） */
+  articleSourcePath?: string;
+  /** 平台接口返回的原始结构化内容（抖音是 article_info） */
+  articleJsonPath?: string;
+  /** 正文图片的本地路径（仅 wantKeyframes=true 时下载） */
   imagePaths?: string[];
   notes?: string[];
 }

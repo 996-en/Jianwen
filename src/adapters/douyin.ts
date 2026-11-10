@@ -10,38 +10,33 @@ import {
 } from "../config.js";
 import { VideoMcpError, type FetchAssetsOptions, type VideoRef } from "../types.js";
 import { buildDetailQuery, decodeComponent, detailParams } from "./douyin-sign.js";
+import { extractAwemeId, isDouyinInput, parseDouyinLink } from "./douyin-parse.js";
+import {
+  douyinTextKind,
+  fetchDouyinTextMedia,
+  imageUrlsOf,
+  parseArticleInfo,
+  type DouyinArticleInfo,
+  type DouyinImage,
+} from "./douyin-text.js";
 import type { MediaFetchResult, PlatformAdapter } from "./types.js";
 
 /** 详情接口地址；query 签名与网页端参数见 `douyin-sign.ts` */
 const DETAIL_ENDPOINT = "https://www.douyin.com/aweme/v1/web/aweme/detail/";
 
-const SHORT_LINK_RE = /(?:https?:\/\/)?v\.douyin\.com\/([A-Za-z0-9_-]+)/i;
-const VIDEO_URL_RE =
-  /(?:https?:\/\/)?(?:[\w-]+\.)?(?:ies)?douyin\.com\/(?:share\/)?video\/(\d{15,25})/i;
-const NOTE_URL_RE =
-  /(?:https?:\/\/)?(?:[\w-]+\.)?(?:ies)?douyin\.com\/(?:share\/)?note\/(\d{15,25})/i;
-/** 裸 aweme_id 只接受 19 位数字，避免与 B 站纯数字 aid 混淆 */
-const BARE_ID_RE = /^\d{19}$/;
+/** 短链跟随 302 后的落地地址里找作品 ID（/share/slides/ 会跳到 /note/） */
+const SHORT_LINK_TARGET_RE = /\/(?:share\/)?(?:video|note|article|slides)\/(\d{15,25})/;
 
-export function extractAwemeId(input: string): string | null {
-  const s = input.trim();
-  const url = s.match(VIDEO_URL_RE);
-  if (url) return url[1]!;
-  const note = s.match(NOTE_URL_RE);
-  if (note) return note[1]!;
-  if (BARE_ID_RE.test(s)) return s;
-  return null;
-}
+/** 链接解析已拆到 `douyin-parse.ts`（纯字符串、可单测），这里保留旧导出名，调用方无需改动 */
+export { extractAwemeId, isDouyinInput };
 
-export function isDouyinInput(input: string): boolean {
-  const s = input.trim();
-  if (!s) return false;
-  if (SHORT_LINK_RE.test(s)) return true;
-  if (VIDEO_URL_RE.test(s)) return true;
-  if (NOTE_URL_RE.test(s)) return true;
-  if (BARE_ID_RE.test(s)) return true;
-  return false;
-}
+/** 主页/合集/直播等是「一堆作品」或实时流，一次只处理一个作品，这里给出明确指引 */
+const UNSUPPORTED_LINK_MESSAGES: Record<string, string> = {
+  user: "这是抖音的个人主页（一堆作品），不是单个作品。请打开具体作品后再复制链接。",
+  collection: "这是抖音的合集/短剧列表（多条作品），当前一次只处理一个作品。请给出其中某一集/某一条的链接。",
+  live: "抖音直播是实时流，没有可下载的完整作品，暂不支持。",
+  unknown: "这个抖音页面（话题、音乐、搜索、活动页等）不是单个作品，暂不支持。请给出作品链接。",
+};
 
 export interface DouyinCookie {
   name: string;
@@ -184,7 +179,10 @@ interface DouyinAweme {
     collect_count?: number;
   };
   video?: DouyinVideo;
-  images?: unknown[];
+  /** 图文作品的图片；有值时 video 往往只是配乐 */
+  images?: DouyinImage[] | null;
+  /** 长文作品的正文容器（article_content 里才是 markdown） */
+  article_info?: DouyinArticleInfo | Record<string, unknown> | string | null;
 }
 
 interface DouyinDetailResponse {
@@ -258,17 +256,15 @@ async function fetchAwemeDetail(awemeId: string): Promise<DouyinAweme> {
 }
 
 /** 抖音短链需要跟随 302 才能拿到 aweme_id；分享文本里只有短链，没有作品 ID */
-async function resolveShortLink(input: string): Promise<string> {
-  const m = input.match(SHORT_LINK_RE);
-  if (!m) throw new VideoMcpError(`无法从输入中提取抖音短链：${input}`, "UNSUPPORTED_URL");
-  const url = `https://v.douyin.com/${m[1]}/`;
+async function resolveShortLink(code: string): Promise<string> {
+  const url = `https://v.douyin.com/${code}/`;
   const res = await fetch(url, {
     method: "GET",
     redirect: "manual",
     headers: { "User-Agent": douyinUserAgent() },
   });
   const location = res.headers.get("location") ?? "";
-  const hit = location.match(/\/(?:share\/)?(?:video|note)\/(\d{15,25})/);
+  const hit = location.match(SHORT_LINK_TARGET_RE);
   if (hit) return hit[1]!;
   // 有些网络环境下 redirect: manual 拿不到 Location，退回跟随重定向后解析最终 URL。
   const followed = await fetch(url, {
@@ -276,10 +272,10 @@ async function resolveShortLink(input: string): Promise<string> {
     redirect: "follow",
     headers: { "User-Agent": douyinUserAgent() },
   });
-  const hit2 = followed.url.match(/\/(?:share\/)?(?:video|note)\/(\d{15,25})/);
+  const hit2 = followed.url.match(SHORT_LINK_TARGET_RE);
   if (hit2) return hit2[1]!;
   throw new VideoMcpError(
-    `抖音短链解析失败（HTTP ${res.status}）：${url}`,
+    `抖音短链解析失败（HTTP ${res.status}）：${url}。如果这条短链对应的是主页或合集，请改为打开具体作品再复制链接。`,
     "UNSUPPORTED_URL",
   );
 }
@@ -318,34 +314,43 @@ export class DouyinAdapter implements PlatformAdapter {
 
   async resolve(input: string): Promise<VideoRef> {
     const s = input.trim();
-    let awemeId = extractAwemeId(s);
-    if (!awemeId && SHORT_LINK_RE.test(s)) {
-      awemeId = await resolveShortLink(s);
+    const link = parseDouyinLink(s);
+    if (!link) {
+      throw new VideoMcpError(`无法从输入中解析抖音作品 ID：${input}`, "UNSUPPORTED_URL");
     }
-    if (!awemeId) {
+    // 主页/合集/直播是「多条作品」或实时流，明确告诉用户要换成单个作品链接
+    if (
+      link.kind !== "video" &&
+      link.kind !== "note" &&
+      link.kind !== "article" &&
+      link.kind !== "short"
+    ) {
       throw new VideoMcpError(
-        `无法从输入中解析抖音作品 ID：${input}`,
+        UNSUPPORTED_LINK_MESSAGES[link.kind] ?? `不支持的抖音链接类型：${link.kind}`,
         "UNSUPPORTED_URL",
       );
     }
 
+    const awemeId = link.kind === "short" ? await resolveShortLink(link.id) : link.id;
     const aweme = await fetchAwemeDetail(awemeId);
-    if (!aweme.video && Array.isArray(aweme.images) && aweme.images.length > 0) {
-      throw new VideoMcpError(
-        "这是抖音图文作品，当前版本只处理视频作品。",
-        "UNSUPPORTED_URL",
-      );
-    }
 
     const id = aweme.aweme_id ?? awemeId;
-    const durationMs = aweme.video?.duration ?? 0;
+    // 不能只看链接路径：短链会跳转，/video 也可能是图文。统一按详情接口的数据判断。
+    const article = parseArticleInfo(aweme.article_info);
+    const imageUrls = imageUrlsOf(aweme);
+    const kind: "video" | "images" | "article" = article
+      ? "article"
+      : imageUrls.length
+        ? "images"
+        : "video";
+    const durationMs = kind === "video" ? (aweme.video?.duration ?? 0) : 0;
     const secUid = aweme.author?.sec_uid;
     const stats = aweme.statistics;
 
     return {
       platform: "douyin",
       id,
-      title: aweme.desc?.trim() || `抖音作品 ${id}`,
+      title: (article?.title || aweme.desc?.trim() || `抖音作品 ${id}`).trim(),
       durationSec: durationMs > 0 ? Math.round(durationMs / 1000) : 0,
       author: aweme.author?.nickname ?? "unknown",
       authorId: undefined,
@@ -363,10 +368,19 @@ export class DouyinAdapter implements PlatformAdapter {
             favorites: stats.collect_count,
           }
         : undefined,
-      pageUrl: `https://www.douyin.com/video/${id}`,
+      pageUrl:
+        kind === "article"
+          ? `https://www.douyin.com/article/${id}`
+          : kind === "images"
+            ? `https://www.douyin.com/note/${id}`
+            : `https://www.douyin.com/video/${id}`,
       extras: {
         awemeId: id,
         authorSecUid: secUid ?? null,
+        kind,
+        imageCount: imageUrls.length,
+        ...(article?.articleId ? { articleId: article.articleId } : {}),
+        ...(typeof article?.readTime === "number" ? { readTime: article.readTime } : {}),
       },
     };
   }
@@ -382,10 +396,19 @@ export class DouyinAdapter implements PlatformAdapter {
     // 抖音网页端不提供字幕轨道，也没有 B 站式故事板：字幕只能靠 ASR，画面只能靠 ffmpeg 抽帧。
     const wantFrames = options?.wantKeyframes === true;
     const wantAudio = options?.wantAsr === true;
-    if (!wantFrames && !wantAudio) return result;
+    // 图文/长文没有时长也没有 mp4，即使不要画面也要取一次详情拿正文
+    const kind = typeof ref.extras?.kind === "string" ? ref.extras.kind : "";
+    const textOnly = kind === "images" || kind === "article";
+    if (!textOnly && !wantFrames && !wantAudio) return result;
 
     const awemeId = String(ref.extras?.awemeId ?? ref.id);
     const aweme = await fetchAwemeDetail(awemeId);
+
+    // 老缓存里的 ref 可能没带 kind：按详情数据兜底，别去下载图文作品的配乐 mp3
+    if (textOnly || douyinTextKind(aweme)) {
+      return fetchDouyinTextMedia(aweme, ref, destDir, options);
+    }
+
     const candidates = videoCandidates(aweme);
     if (!candidates.length) {
       throw new VideoMcpError(

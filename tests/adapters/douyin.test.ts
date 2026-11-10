@@ -197,6 +197,151 @@ describe("DouyinAdapter.resolve", () => {
   );
 });
 
+describe("DouyinAdapter.resolve 图文与长文", () => {
+  it(
+    "图片作品不再报错：kind=images，页面地址指向 /note/，时长为 0",
+    withCookies(async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async () =>
+        Response.json({
+          status_code: 0,
+          aweme_detail: {
+            aweme_id: AWEME_ID,
+            aweme_type: 68,
+            desc: "2026年最新思想汇报！可借鉴！！！",
+            author: { nickname: "李老师", sec_uid: "MS4wLjABAAAA" },
+            images: [
+              { url_list: ["https://cdn.example.com/1.webp"] },
+              { url_list: ["https://cdn.example.com/2.webp"] },
+              { url_list: ["https://cdn.example.com/3.webp"] },
+            ],
+            video: { duration: 0, play_addr: { url_list: ["https://cdn.example.com/bgm.mp3"] } },
+          },
+        });
+      try {
+        const ref = await new DouyinAdapter().resolve(`https://www.douyin.com/note/${AWEME_ID}`);
+        assert.equal(ref.extras?.kind, "images");
+        assert.equal(ref.extras?.imageCount, 3);
+        assert.equal(ref.durationSec, 0);
+        assert.equal(ref.title, "2026年最新思想汇报！可借鉴！！！");
+        assert.equal(ref.pageUrl, `https://www.douyin.com/note/${AWEME_ID}`);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    }),
+  );
+
+  it(
+    "长文用 article_title 作标题，页面地址指向 /article/，并带 readTime",
+    withCookies(async () => {
+      const originalFetch = globalThis.fetch;
+      const markdown = "正文段落";
+      globalThis.fetch = async () =>
+        Response.json({
+          status_code: 0,
+          aweme_detail: {
+            aweme_id: AWEME_ID,
+            aweme_type: 163,
+            desc: "朋友们好，我是莫言。",
+            author: { nickname: "莫言", sec_uid: "MS4wLjABAAAA" },
+            article_info: {
+              article_id: AWEME_ID,
+              article_title: "莫言：我的父亲",
+              read_time: 4,
+              article_content: JSON.stringify({ markdown }),
+            },
+          },
+        });
+      try {
+        const ref = await new DouyinAdapter().resolve(`https://www.douyin.com/article/${AWEME_ID}`);
+        assert.equal(ref.extras?.kind, "article");
+        assert.equal(ref.extras?.articleId, AWEME_ID);
+        assert.equal(ref.extras?.readTime, 4);
+        assert.equal(ref.title, "莫言：我的父亲");
+        assert.equal(ref.pageUrl, `https://www.douyin.com/article/${AWEME_ID}`);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    }),
+  );
+
+  it("主页/合集给明确提示，且不发详情请求", async () => {
+    const originalFetch = globalThis.fetch;
+    let called = false;
+    globalThis.fetch = async () => {
+      called = true;
+      return Response.json({ status_code: 0 });
+    };
+    try {
+      await assert.rejects(
+        () =>
+          new DouyinAdapter().resolve(
+            "https://www.douyin.com/user/MS4wLjABAAAADl3WHEkaQ1tcD4-15S_njfDxf-DzI9AkhXGz-HzyVcwwP7GcoVu0dhm2b-MjmSUQ",
+          ),
+        (err: { code?: string; message?: string }) =>
+          err.code === "UNSUPPORTED_URL" && /主页/.test(err.message ?? ""),
+      );
+      await assert.rejects(
+        () => new DouyinAdapter().resolve("https://www.douyin.com/collection/7123456789012345678"),
+        (err: { code?: string; message?: string }) =>
+          err.code === "UNSUPPORTED_URL" && /合集/.test(err.message ?? ""),
+      );
+      assert.equal(called, false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("DouyinAdapter.fetchMedia 图文", () => {
+  it(
+    "图文即使不要画面也返回正文，只写 article.md，不请求任何 mp4",
+    withCookies(async () => {
+      const originalFetch = globalThis.fetch;
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "douyin-note-media-"));
+      const mediaRequests: string[] = [];
+      globalThis.fetch = async (input) => {
+        const url = String(input);
+        if (url.startsWith("https://www.douyin.com/aweme/v1/web/aweme/detail/")) {
+          return Response.json({
+            status_code: 0,
+            aweme_detail: {
+              aweme_id: AWEME_ID,
+              desc: "图文文案",
+              images: [{ url_list: ["https://cdn.example.com/1.webp"] }],
+              video: { duration: 0, play_addr: { url_list: ["https://cdn.example.com/bgm.mp3"] } },
+            },
+          });
+        }
+        mediaRequests.push(url);
+        throw new Error(`图文不应该下载媒体: ${url}`);
+      };
+      try {
+        const ref = {
+          platform: "douyin",
+          id: AWEME_ID,
+          title: "图文文案",
+          durationSec: 0,
+          author: "作者",
+          pageUrl: `https://www.douyin.com/note/${AWEME_ID}`,
+          extras: { awemeId: AWEME_ID, kind: "images" },
+        };
+        const result = await new DouyinAdapter().fetchMedia(ref, dir, {});
+        assert.deepEqual(mediaRequests, []);
+        assert.equal(result.articleText, "图文文案");
+        assert.equal(result.imagePaths, undefined);
+        assert.ok(result.articlePath);
+        const md = await fs.readFile(result.articlePath, "utf8");
+        assert.ok(md.includes("## 图片"));
+        assert.ok(md.includes("https://cdn.example.com/1.webp"));
+      } finally {
+        globalThis.fetch = originalFetch;
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+});
+
 describe("DouyinAdapter.fetchMedia", () => {
   it(
     "优先下载带音轨的 play_addr 完整 mp4",

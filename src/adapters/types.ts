@@ -8,11 +8,15 @@ export interface MediaFetchResult {
   subtitleText?: string;
   subtitlePath?: string;
   keyframePaths?: string[];
-  /** 微信公众号正文纯文本；存在时 pipeline 会跳过 ASR/ffmpeg */
+  /** 文章/图文正文纯文本（微信公众号、B 站动态/专栏、抖音长文/图文）；存在时 pipeline 会跳过 ASR/ffmpeg */
   articleText?: string;
   articlePath?: string;
   articleHtmlPath?: string;
-  /** 微信公众号正文图片（由 wantKeyframes 控制是否下载） */
+  /** 原始 Markdown（抖音长文） */
+  articleSourcePath?: string;
+  /** 平台原始结构化内容 JSON（抖音 article_info） */
+  articleJsonPath?: string;
+  /** 正文图片（由 wantKeyframes 控制是否下载） */
   imagePaths?: string[];
   /** 适配器附带的提示，由 pipeline 合并进 manifest.notes */
   notes?: string[];

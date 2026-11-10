@@ -10,7 +10,7 @@
 
 | MCP 工具 | 作用 |
 | --- | --- |
-| `resolve_video` | 解析 B 站视频链接（`?p=N` 指定分 P）、`b23.tv` 短链、BV／av 号，返回标题、时长、作者／UID、发布时间、互动数及 `aid`/`cid`；也解析 B 站番剧（`/bangumi/play/ep|ss|md`）、课程（`/cheese/play/ep|ss`）、动态（`/opus/<id>`、`t.bilibili.com/<id>`）与专栏（`/read/cv<id>`），返回元数据、正文与图片地址；还解析抖音作品链接、`v.douyin.com` 分享链接或 aweme id，返回标题、时长、作者、发布时间与互动数；还解析微信文章短链／长链，返回标题、公众号、作者、发布时间、正文与图片地址。 |
+| `resolve_video` | 解析 B 站视频链接（`?p=N` 指定分 P）、`b23.tv` 短链、BV／av 号，返回标题、时长、作者／UID、发布时间、互动数及 `aid`/`cid`；也解析 B 站番剧（`/bangumi/play/ep|ss|md`）、课程（`/cheese/play/ep|ss`）、动态（`/opus/<id>`、`t.bilibili.com/<id>`）与专栏（`/read/cv<id>`），返回元数据、正文与图片地址；还解析抖音视频、图文（`/note/<id>`）、长文（`/article/<id>`）、`?modal_id=` 链接、`v.douyin.com` 分享链接或 aweme id，返回标题、作者、发布时间、互动数与 `extras.kind`（`video`/`images`/`article`）；还解析微信文章短链／长链，返回标题、公众号、作者、发布时间、正文与图片地址。 |
 | `fetch_assets` | 获取字幕，按需进行语音转写或抽取关键帧，写入本地 `AssetManifest`。默认只取文字，需要画面必须显式要帧；微信文章写 `article.md`／`article.html`，按需下载正文图片。 |
 | `get_cached` | 读取已有缓存清单，不重复下载媒体。 |
 | `summarize` | 可选：将已有文字与最多六张关键帧发送到配置好的 OpenAI 兼容聊天／视觉 API，生成结构化摘要。 |
@@ -31,12 +31,13 @@
 
 ### 抖音数据从哪里来
 
-1. 支持 `https://www.douyin.com/video/<aweme_id>`、`v.douyin.com/...` 分享短链（App 复制的整段分享文字也可以，短链会被跟随拿到作品 ID），以及 19 位裸 aweme id。图文作品（`/note/...`）返回 `UNSUPPORTED_URL`。
+1. 支持 `https://www.douyin.com/video/<aweme_id>`、图文 `/note/<id>`、长文 `/article/<id>`、主页弹窗的 `?modal_id=<aweme_id>`、`v.douyin.com/...` 分享短链（App 复制的整段分享文字也可以，短链会被跟随拿到作品 ID），以及 19 位裸 aweme id。个人主页（`/user/...`）、合集／短剧和直播间属于“多条作品”或实时流，返回 `UNSUPPORTED_URL` 并提示改成单个作品链接。
 2. 元数据来自网页版详情接口 `GET https://www.douyin.com/aweme/v1/web/aweme/detail/`。该接口不接受裸请求：既需要浏览器签发的访客身份（`UIFID`、`ttwid` 等），也需要 query 签名。所以本项目按 `VIDEO_MCP_DOUYIN_COOKIES` → `VIDEO_MCP_DOUYIN_COOKIE_FILE` → 项目根目录 `.douyin-cookies.txt` 的顺序取 Cookie（最后一个就是默认值，通常不用配 `env`），并自行计算 `x-secsdk-web-signature`；签名公式写在 `src/adapters/douyin-sign.ts` 顶部，与浏览器实际发出的签名逐字节一致。
 3. Cookie 缺失或失效返回 `COOKIE_REQUIRED`。Cookie 必须来自**同一个浏览器会话**（访客 `UIFID` 与 `ttwid` 是成套签发的），自行拼接或伪造 `UIFID` 会得到 `403 Blocked by ArgusSecurityPlugin`。不需要 `a_bogus` 和 `msToken`。
 4. 抖音**没有字幕轨道，也没有故事板**。请求 ASR 或关键帧时会下载 `play_addr` 的完整 mp4（h264 + aac）；`bit_rate[*].play_addr` 多是纯视频 DASH 流、没有音轨，所以不使用。之后复用原有管线：ffmpeg 转单声道 16 kHz WAV 做 ASR、ffmpeg 抽帧。
    **只要文字、不要画面时（即默认路径）**：ffmpeg 会直接读 CDN 地址，而不是先下整片 —— 抖音 CDN 支持 `206 Partial Content` 且 `moov` 在文件头，因此只需下载音轨部分（11 分钟的视频约 10 MB，而不是 35 MB），并一次性写成 16 kHz WAV。任何一步失败（没装 ffmpeg、CDN 拒 Range、签名过期）都会静默回落到整片下载，所以**产物完全一样，只是省流量／省磁盘**；总耗时基本不变，因为大头是 Whisper。想恢复“总是先下整片”设 `VIDEO_MCP_DOUYIN_FAST_AUDIO=0`。
 5. 抖音网页接口通常把 `play_count` 返回为 0，因此 `stats.views` 会留空而不是填 0。作者 ID 是 `sec_uid` 字符串，放不进数字型的 `authorId`，改放在 `extras.authorSecUid`。
+6. **图文和长文是文字，不是视频。** `extras.kind` 按详情接口返回的数据判断，而不是看链接路径（短链会跳转，`/video` 也可能其实是图文）：图文是 `images`（`pageUrl` 用 `/note/`），长文是 `article`（`pageUrl` 用 `/article/`）。`fetch_assets` 会写 `article.md`（标题 + 元信息 + 正文 + 图片清单）；长文另外保留 `article.original.md`（原始 Markdown）和 `article.json`（原始 `article_info`）。整个过程不跑 ASR、不动 ffmpeg、不下载 mp4。图片**默认不下载**，需要看图时传 `wantKeyframes: true`。图文的文案往往只是一个标题，纯文字摘要无法描述图片内容。
 
 ### 微信公众号数据从哪里来
 
@@ -99,7 +100,10 @@ src/                         正式代码，`npm run build` 只编译这里（�
     bilibili-storyboard.ts   B 站故事板：videoshot 雪碧图接口 + sharp 裁帧；失败时由
                              bilibili.ts 降级为下载整段视频
     article-html.ts          图文平台共用的 HTML → 文本/markdown/图片工具
-    douyin.ts                抖音：短链跳转、Cookie 会话、签名后的详情请求、媒体候选下载
+    douyin-parse.ts          抖音链接分类：video／note／article／user／collection／live／短链／modal_id（纯函数）
+    douyin.ts                抖音：短链跳转、Cookie 会话、签名后的详情请求、媒体候选下载、图文分派
+    douyin-text.ts           抖音图文与长文：article_info 解析、图片地址提取、
+                             article.md/article.original.md/article.json 写入
     douyin-sign.ts           抖音 query 签名 x-secsdk-web-signature 与固定网页端参数（纯函数）
     weixin.ts                微信公众号图文：URL 识别、HTML 标题/正文/图片解析、chksm 兜底、
                              article.md/article.html 写入
@@ -119,7 +123,9 @@ tests/                       测试，与 src/ 同构镜像；`npm test` 跑这�
   adapters/bilibili-pgc.test.ts    番剧/课程元数据与 playurl 错误码映射
   adapters/bilibili-storyboard.test.ts  故事板裁帧与降级路径
   adapters/douyin.test.ts    抖音输入识别、Cookie 文件解析、resolve 字段映射、错误码、
-                             媒体候选（mock fetch）
+                             媒体候选、图文分派（mock fetch）
+  adapters/douyin-parse.test.ts  链接分类：video/note/article/user/collection/live/modal_id
+  adapters/douyin-text.test.ts   article_info 解析、图片优先级、wantKeyframes 开关
   adapters/douyin-sign.test.ts  签名算法离线回归，无网络也能跑
   adapters/weixin.test.ts    微信 URL 识别、HTML 解析、验证码/chksm 路径、图片下载（mock fetch）
   cache/store.test.ts        缓存目录与 manifest 往返
@@ -264,7 +270,7 @@ fetch_assets   { "id": "22eec806d6a5608c3c65dfc32200d676", "wantKeyframes": true
 - **没有关键帧：**故事板可能不可用；回退抽帧要求能下载媒体、能执行 ffmpeg，通常建议安装 yt-dlp。暂不支持登录态、Cookie、大会员或付费视频。
 - **缓存未命中：**先调用 `fetch_assets`；`get_cached` 才能读取。旧缓存的互动数据不会自动刷新。
 - **长任务中断：**要看客户端自身的请求超时；单独增大 `asrTimeoutSec` 并不能改变客户端超时。Pi 修改 MCP 配置后可能需要 `/reload`。
-- **平台范围：**`src/adapters/registry.ts` 注册了 B 站、抖音与微信。B 站支持的链接类型：视频（含 `?p=N` 分 P）、番剧（`/bangumi/play/ep|ss|md`）、课程（`/cheese/play/ep|ss`）、动态/opus、专栏、`b23.tv` 短链；音频区（`/audio/au<id>`）、直播、收藏夹、合集、UP 主空间**暂不支持**，会返回 `UNSUPPORTED_URL` 并列出支持范围。抖音依赖浏览器访客 Cookie 与自行计算的签名；未配置 `VIDEO_MCP_DOUYIN_COOKIE_FILE` 时返回 `COOKIE_REQUIRED`。抖音返回 **HTTP 200 但响应体为空**时属于软风控／作品不可见，应刷新 Cookie，不要循环重试。图文作品（`/note/`）不支持。微信短链通常可直接读取；长链在没有有效 `chksm` 时返回 `WEIXIN_CAPTCHA`。已注销/删除/作者隐私设置不可见/违规下架的文章返回 `NOT_FOUND` 并说明原因。微信视频号暂不支持；三个平台的接口、Cookie 与签名机制完全不同，各自单独实现适配器。
+- **平台范围：**`src/adapters/registry.ts` 注册了 B 站、抖音与微信。B 站支持的链接类型：视频（含 `?p=N` 分 P）、番剧（`/bangumi/play/ep|ss|md`）、课程（`/cheese/play/ep|ss`）、动态/opus、专栏、`b23.tv` 短链；音频区（`/audio/au<id>`）、直播、收藏夹、合集、UP 主空间**暂不支持**，会返回 `UNSUPPORTED_URL` 并列出支持范围。抖音依赖浏览器访客 Cookie 与自行计算的签名；未配置 `VIDEO_MCP_DOUYIN_COOKIE_FILE` 时返回 `COOKIE_REQUIRED`。抖音返回 **HTTP 200 但响应体为空**时属于软风控／作品不可见，应刷新 Cookie，不要循环重试。抖音支持的链接类型：视频（`/video/<id>`、`?modal_id=`）、图文（`/note/<id>`、`/share/slides/<id>`）、长文（`/article/<id>`）、`v.douyin.com` 分享链接与 19 位裸 id；个人主页、合集／短剧、直播间返回 `UNSUPPORTED_URL` 并说明原因。微信短链通常可直接读取；长链在没有有效 `chksm` 时返回 `WEIXIN_CAPTCHA`。已注销/删除/作者隐私设置不可见/违规下架的文章返回 `NOT_FOUND` 并说明原因。微信视频号暂不支持；三个平台的接口、Cookie 与签名机制完全不同，各自单独实现适配器。
 
 扩展平台需在 `src/adapters/` 实现 `PlatformAdapter` 并于 `src/adapters/registry.ts` 注册，变更后运行 `npm test`、`npm run build`。Windows Cursor 详细安装另见 [INSTALL_CN.md](INSTALL_CN.md)。
 

@@ -269,16 +269,23 @@ export async function fetchAssets(
 
   notes.push(...(media.notes ?? []));
 
-  // 图文内容（微信公众号文章、B 站动态/专栏）不是音视频：拿到正文后直接写 manifest，
+  // 图文内容（微信公众号文章、B 站动态/专栏、抖音长文/图文）不是音视频：拿到正文后直接写 manifest，
   // 不进入 ffmpeg / ASR / 抽帧分支，也不受 durationSec=0 的影响。
   if (
     media.articleText !== undefined ||
     media.articlePath !== undefined ||
     media.articleHtmlPath !== undefined
   ) {
-    // 平台名保持简单：bilibili 的图文是动态/专栏，weixin 是公众号文章
-    const platformLabel = ref.platform === "weixin" ? "Weixin" : ref.platform === "bilibili" ? "Bilibili" : ref.platform;
-    notes.push(`${platformLabel} article parsed; ASR and video keyframes were skipped.`);
+    // 平台名保持简单：bilibili 的图文是动态/专栏，weixin 是公众号文章，douyin 是长文/图文
+    const platformLabel =
+      ref.platform === "weixin"
+        ? "Weixin"
+        : ref.platform === "bilibili"
+          ? "Bilibili"
+          : ref.platform === "douyin"
+            ? "Douyin"
+            : ref.platform;
+    notes.push(`${platformLabel} text post parsed; ASR and video keyframes were skipped.`);
     const manifest: AssetManifest = {
       ref,
       createdAt: new Date().toISOString(),
@@ -286,6 +293,8 @@ export async function fetchAssets(
       articleText: media.articleText,
       articlePath: media.articlePath,
       articleHtmlPath: media.articleHtmlPath,
+      articleSourcePath: media.articleSourcePath,
+      articleJsonPath: media.articleJsonPath,
       imagePaths: media.imagePaths,
       notes,
     };

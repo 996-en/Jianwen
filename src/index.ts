@@ -67,9 +67,9 @@ const server = new McpServer({
 
 server.tool(
   "resolve_video",
-  "Resolve a Bilibili video/dynamic/column or a Douyin video, or a Weixin public-account article into a VideoRef (title, author, publishedAt and platform extras). Bilibili also accepts bangumi and course episodes (metadata + episode), dynamics (/opus/<id>) and columns (/read/cv<id>), which come back as text with image URLs. Douyin requires browser guest cookies via VIDEO_MCP_DOUYIN_COOKIE_FILE or VIDEO_MCP_DOUYIN_COOKIES; Weixin long links may need VIDEO_MCP_WEIXIN_CHKSM, while short mp.weixin.qq.com/s/<id> links usually work directly.",
+  "Resolve a Bilibili video/dynamic/column or a Douyin video, image post or long article, or a Weixin public-account article into a VideoRef (title, author, publishedAt and platform extras). Bilibili also accepts bangumi and course episodes (metadata + episode), dynamics (/opus/<id>) and columns (/read/cv<id>), which come back as text with image URLs. Douyin accepts /video/<id>, /note/<id> (image posts), /article/<id> (long articles), ?modal_id=<id>, bare 19-digit ids and v.douyin.com share links; user home pages, collections and live rooms are rejected with an explicit message because they hold many works. Douyin requires browser guest cookies via VIDEO_MCP_DOUYIN_COOKIE_FILE or VIDEO_MCP_DOUYIN_COOKIES; Weixin long links may need VIDEO_MCP_WEIXIN_CHKSM, while short mp.weixin.qq.com/s/<id> links usually work directly.",
   {
-    url: z.string().optional().describe("Bilibili watch/page URL (video with optional ?p=N, /bangumi/play/ep|ss|md, /cheese/play/ep|ss, /opus/<id>, /read/cv<id>), b23.tv short link, Douyin video URL, v.douyin.com share link, or Weixin article URL (mp.weixin.qq.com/s/...)"),
+    url: z.string().optional().describe("Bilibili watch/page URL (video with optional ?p=N, /bangumi/play/ep|ss|md, /cheese/play/ep|ss, /opus/<id>, /read/cv<id>), b23.tv short link, Douyin URL (/video, /note, /article, ?modal_id=) or v.douyin.com share text, or Weixin article URL (mp.weixin.qq.com/s/...)"),
     id: z.string().optional().describe("BV id (e.g. BV1xx...), av number, or Douyin aweme id"),
   },
   async ({ url, id }) => {
@@ -84,7 +84,7 @@ server.tool(
 
 server.tool(
   "fetch_assets",
-  "Cache video assets (subtitles, optional ASR, up to 6 storyboard frames; fall back to video download + ffmpeg if storyboard is unavailable), or parse a text page (Weixin public-account article, Bilibili dynamic/column) into article.md and optional images. Local ASR timeout is estimated from durationSec or overridden with asrTimeoutSec; long operations report progress. Returns local paths. Bilibili exposes subtitles and a storyboard; Douyin has neither, so Douyin always downloads the video for ASR/frames; text pages (Weixin articles, Bilibili dynamics/columns) skip ASR/ffmpeg entirely.",
+  "Cache video assets (subtitles, optional ASR, up to 6 storyboard frames; fall back to video download + ffmpeg if storyboard is unavailable), or parse a text page (Weixin public-account article, Bilibili dynamic/column, Douyin long article or image post) into article.md plus optional images. Douyin long articles also keep article.original.md (raw Markdown) and article.json (raw article_info). Local ASR timeout is estimated from durationSec or overridden with asrTimeoutSec; long operations report progress. Returns local paths. Bilibili exposes subtitles and a storyboard; Douyin has neither, so Douyin downloads the video only when ASR/frames are requested; text pages skip ASR/ffmpeg entirely.",
   {
     url: z.string().optional(),
     id: z.string().optional(),
@@ -95,7 +95,7 @@ server.tool(
     asrTimeoutSec: z.number().int().min(30).max(86400).optional()
       .describe("Optional Whisper process timeout in seconds; defaults to durationSec * 3 + 120 (min 300, max 86400). Does not change the MCP client's timeout."),
     wantKeyframes: z.boolean().optional().default(false)
-      .describe("Extract representative frames for videos, or download article images for Weixin. Defaults to false: without it only text (platform subtitles, ASR, or article text) is collected, which avoids downloading the whole video on Douyin. Set true when you need to see the picture."),
+      .describe("Extract representative frames for videos, or download article/image-post images (Weixin, Bilibili dynamics/columns, Douyin image posts). Defaults to false: without it only text (platform subtitles, ASR, or article text) is collected, which avoids downloading the whole video on Douyin and avoids fetching dozens of images for image posts. Set true when you need to see the picture."),
     keyframeIntervalSec: z.number().optional().default(10),
   },
   async (args, extra) => {
@@ -180,7 +180,7 @@ server.tool(
 
 server.tool(
   "summarize",
-  "Optional structured summary from cached video assets or Weixin article text via VIDEO_MCP_SUMMARY_* env. Errors clearly if unset.",
+  "Optional structured summary from cached video assets or article/text-post text via VIDEO_MCP_SUMMARY_* env. Errors clearly if unset.",
   {
     url: z.string().optional(),
     id: z.string().optional(),
