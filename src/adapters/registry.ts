@@ -2,6 +2,7 @@ import { VideoMcpError } from "../types.js";
 import { BilibiliAdapter } from "./bilibili.js";
 import { DouyinAdapter } from "./douyin.js";
 import { WeixinAdapter } from "./weixin.js";
+import { XiaohongshuAdapter } from "./xiaohongshu.js";
 import type { PlatformAdapter } from "./types.js";
 
 /**
@@ -12,6 +13,7 @@ const adapters: PlatformAdapter[] = [
   new BilibiliAdapter(),
   new DouyinAdapter(),
   new WeixinAdapter(),
+  new XiaohongshuAdapter(),
 ];
 
 export function listAdapters(): PlatformAdapter[] {
@@ -22,7 +24,7 @@ export function findAdapter(input: string): PlatformAdapter {
   const hit = adapters.find((a) => a.canHandle(input));
   if (!hit) {
     throw new VideoMcpError(
-      `No platform adapter for: ${input}. Supports Bilibili URLs/BV/av ids, Douyin video URLs or aweme ids, and Weixin article URLs (mp.weixin.qq.com/s/...).`,
+      `No platform adapter for: ${input}. Supports Bilibili URLs/BV/av ids, Douyin video URLs or aweme ids, Weixin article URLs (mp.weixin.qq.com/s/...), and Xiaohongshu note URLs.`,
       "UNSUPPORTED_URL",
     );
   }

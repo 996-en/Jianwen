@@ -2,15 +2,15 @@
 
 [English](README.md) | 简体中文
 
-**让 AI 先“看见”和“听见”，再讨论视频。** 见闻是一个运行在本机、通过 stdio 提供服务的 MCP 工具：解析 B 站或抖音视频、微信公众号图文，整理标题和互动数据、字幕／语音转写、画面关键帧或文章正文，再把可读取的文字与本地文件路径交给 Pi、Cursor、Claude Desktop 等客户端。
+**让 AI 先“看见”和“听见”，再讨论视频。** 见闻是一个运行在本机、通过 stdio 提供服务的 MCP 工具：解析 B 站和抖音作品、微信公众号图文，以及小红书公开笔记，整理标题和互动数据、字幕／语音转写、画面关键帧或文章正文，再把可读取的文字与本地文件路径交给 Pi、Cursor、Claude Desktop 等客户端。
 
-名字虽然不绑定平台，**目前实现了 B 站、抖音与微信公众号图文**。抖音需要浏览器签发的访客 Cookie，因为它的详情接口要求浏览器身份和签名（见下文）；微信长链可能需要 `chksm`，短链通常可直接读取。微信视频号（Channels）尚未实现。
+名字虽然不绑定平台，**目前实现了 B 站、抖音与微信公众号图文，并实验性支持小红书公开笔记**。抖音需要浏览器签发的访客 Cookie，因为它的详情接口要求浏览器身份和签名（见下文）；微信长链可能需要 `chksm`，短链通常可直接读取。微信视频号（Channels）尚未实现。
 
 ## 能做什么
 
 | MCP 工具 | 作用 |
 | --- | --- |
-| `resolve_video` | 解析 B 站视频链接（`?p=N` 指定分 P）、`b23.tv` 短链、BV／av 号，返回标题、时长、作者／UID、发布时间、互动数及 `aid`/`cid`；也解析 B 站番剧（`/bangumi/play/ep|ss|md`）、课程（`/cheese/play/ep|ss`）、动态（`/opus/<id>`、`t.bilibili.com/<id>`）与专栏（`/read/cv<id>`），返回元数据、正文与图片地址；还解析抖音视频、图文（`/note/<id>`）、长文（`/article/<id>`）、`?modal_id=` 链接、`v.douyin.com` 分享链接或 aweme id，返回标题、作者、发布时间、互动数与 `extras.kind`（`video`/`images`/`article`）；还解析微信文章短链／长链，返回标题、公众号、作者、发布时间、正文与图片地址。 |
+| `resolve_video` | 解析 B 站视频链接（`?p=N` 指定分 P）、`b23.tv` 短链、BV／av 号，返回标题、时长、作者／UID、发布时间、互动数及 `aid`/`cid`；也解析 B 站番剧（`/bangumi/play/ep|ss|md`）、课程（`/cheese/play/ep|ss`）、动态（`/opus/<id>`、`t.bilibili.com/<id>`）与专栏（`/read/cv<id>`），返回元数据、正文与图片地址；还解析抖音视频、图文（`/note/<id>`）、长文（`/article/<id>`）、`?modal_id=` 链接、`v.douyin.com` 分享链接或 aweme id，返回标题、作者、发布时间、互动数与 `extras.kind`（`video`/`images`/`article`）；还解析微信文章短链／长链，返回标题、公众号、作者、发布时间、正文与图片地址；还解析小红书视频和图文笔记，平台有提供时返回互动数。 |
 | `fetch_assets` | 获取字幕，按需进行语音转写或抽取关键帧，写入本地 `AssetManifest`。默认只取文字，需要画面必须显式要帧；微信文章写 `article.md`／`article.html`，按需下载正文图片。 |
 | `get_cached` | 读取已有缓存清单，不重复下载媒体。 |
 | `summarize` | 可选：将已有文字与最多六张关键帧发送到配置好的 OpenAI 兼容聊天／视觉 API，生成结构化摘要。 |
@@ -57,6 +57,13 @@ npm run douyin:cookies -- --out D:/path/cookies.txt
 ```
 
 Cookie 会过期（几周到几个月），失效表现是 `COOKIE_REQUIRED` 或 200 空响应，重跑上面的命令即可。`scripts/douyin-cookies.mjs` 只是本机便利脚本，不参与 MCP 运行时，也不会打进 `dist`。
+
+### 小红书（实验性支持）
+
+- 支持单篇公开视频和图文笔记，可传 `xhslink.com`／`xhslink.cn` 分享短链（或整段分享文字），也可传 `xiaohongshu.com/explore/<id>` 或 `/discovery/item/<id>` 长链。请保留原链接里的 `xsec_token` 等参数；旧链接打不开时可重新复制分享链接。
+- `resolve_video` 从笔记自带的数据读取点赞、评论、收藏和分享数，不会额外请求。平台没给的数字不填，明确返回的 0 会保留。`1.2万` 会换算为约 12000，带 `+` 的数字只表示至少有那么多。
+- 网页读取使用系统 `curl`（Windows 为 `curl.exe`）。优先匿名读取；如需登录态，可配置 `VIDEO_MCP_XHS_COOKIES`、`VIDEO_MCP_XHS_COOKIE_FILE` 或项目根目录的 `.xhs-cookies.txt`，但不能保证过期链接或不可见笔记能打开。
+- 图文会生成 `article.md`，默认不下载图片；需要看图时传 `wantKeyframes: true`。视频复用现有 ASR 和抽帧流程。
 
 ## 安装前准备
 

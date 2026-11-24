@@ -5,12 +5,14 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import {
   DEFAULT_DOUYIN_COOKIE_FILE,
+  DEFAULT_XHS_COOKIE_FILE,
   detectReleaseWhisper,
   douyinCookieFile,
   douyinFastAudio,
   getAsrProvider,
   projectRoot,
   whisperVadModel,
+  xhsCookieFile,
 } from "../src/config.js";
 
 describe("config: 抖音 Cookie 路径", () => {
@@ -27,6 +29,21 @@ describe("config: 抖音 Cookie 路径", () => {
     } finally {
       if (prev === undefined) delete process.env.VIDEO_MCP_DOUYIN_COOKIE_FILE;
       else process.env.VIDEO_MCP_DOUYIN_COOKIE_FILE = prev;
+    }
+  });
+});
+
+describe("config: 小红书 Cookie 路径", () => {
+  it("默认文件位于项目根目录的 .xhs-cookies.txt", () => {
+    assert.equal(DEFAULT_XHS_COOKIE_FILE, path.join(projectRoot, ".xhs-cookies.txt"));
+  });
+  it("环境变量优先于默认文件", () => {
+    const prev = process.env.VIDEO_MCP_XHS_COOKIE_FILE;
+    process.env.VIDEO_MCP_XHS_COOKIE_FILE = "D:/custom/xhs.txt";
+    try { assert.equal(xhsCookieFile(), "D:/custom/xhs.txt"); }
+    finally {
+      if (prev === undefined) delete process.env.VIDEO_MCP_XHS_COOKIE_FILE;
+      else process.env.VIDEO_MCP_XHS_COOKIE_FILE = prev;
     }
   });
 });

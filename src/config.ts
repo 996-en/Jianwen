@@ -14,6 +14,10 @@ export const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.u
  */
 export const DEFAULT_DOUYIN_COOKIE_FILE = path.join(projectRoot, ".douyin-cookies.txt");
 
+/** 小红书登录 Cookie；`npm run xhs:cookies` 写入，已在 `.gitignore` 中排除。 */
+export const DEFAULT_XHS_COOKIE_FILE = path.join(projectRoot, ".xhs-cookies.txt");
+
+
 let nvidiaProbe: boolean | undefined;
 
 /** 只探测一次：有 NVIDIA 显卡时才优先选 Release/ 里的 CUDA 版 whisper */
@@ -229,3 +233,23 @@ export function douyinCookieFile(): string | undefined {
   if (v) return v;
   return existsSync(DEFAULT_DOUYIN_COOKIE_FILE) ? DEFAULT_DOUYIN_COOKIE_FILE : undefined;
 }
+
+export function xiaohongshuUserAgent(): string {
+  return (
+    process.env.VIDEO_MCP_XHS_UA?.trim() ||
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+  );
+}
+
+export function xhsCookiesRaw(): string | undefined {
+  const v = process.env.VIDEO_MCP_XHS_COOKIES?.trim();
+  return v ? v : undefined;
+}
+
+/** 存在默认 `.xhs-cookies.txt` 时自动启用；公开短链无 Cookie 也能解析。 */
+export function xhsCookieFile(): string | undefined {
+  const v = process.env.VIDEO_MCP_XHS_COOKIE_FILE?.trim();
+  if (v) return v;
+  return existsSync(DEFAULT_XHS_COOKIE_FILE) ? DEFAULT_XHS_COOKIE_FILE : undefined;
+}
+

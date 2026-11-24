@@ -1,7 +1,7 @@
 {
   "name": "jianwen",
   "version": "0.1.0",
-  "description": "Jianwen (见闻): local MCP server that turns media and articles from online platforms (Bilibili, Douyin, Weixin public accounts) into model-readable context - metadata, subtitles, ASR, keyframes and article text",
+  "description": "Jianwen (见闻): local MCP server that turns media and articles from online platforms (Bilibili, Douyin, Weixin public accounts, Xiaohongshu public notes) into model-readable context - metadata, subtitles, ASR, keyframes and article text",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -13,6 +13,7 @@
     "dev": "tsc --watch",
     "test": "tsc -p tsconfig.test.json && node --import tsx --test \"tests/**/*.test.ts\"",
     "douyin:cookies": "node scripts/douyin-cookies.mjs",
+    "xhs:cookies": "node scripts/xhs-cookies.mjs",
     "prepare": "npm run build"
   },
   "engines": {
@@ -37,6 +38,7 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "@ikenxuan/xhshow-ts": "^1.2.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "opencc-js": "^1.4.2",
     "sharp": "^0.35.5",

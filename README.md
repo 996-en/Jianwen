@@ -2,15 +2,15 @@
 
 English | [简体中文](README.zh-CN.md)
 
-**Give an AI something to see and hear before asking it to explain a video.** Jianwen is a local, stdio-based MCP server. It resolves a Bilibili or Douyin video, or a Weixin public-account article, collects metadata, subtitles or speech transcripts, representative frames, or article text, then returns an asset manifest to an MCP client such as Pi, Cursor, or Claude Desktop.
+**Give an AI something to see and hear before asking it to explain a video.** Jianwen is a local, stdio-based MCP server. It resolves Bilibili and Douyin posts, Weixin public-account articles, and public Xiaohongshu notes, collects metadata, subtitles or speech transcripts, representative frames, or article text, then returns an asset manifest to an MCP client such as Pi, Cursor, or Claude Desktop.
 
-The name is platform-neutral; **Bilibili, Douyin, and Weixin public-account articles are implemented**. Douyin needs browser-issued guest cookies, because its detail endpoint rejects requests without a browser identity signature (see below). Weixin long links may need a `chksm` token; short links usually work directly. Weixin Channels (视频号) videos are not implemented yet.
+The name is platform-neutral; **Bilibili, Douyin, Weixin public-account articles, and experimental Xiaohongshu public notes are implemented**. Douyin needs browser-issued guest cookies, because its detail endpoint rejects requests without a browser identity signature (see below). Weixin long links may need a `chksm` token; short links usually work directly. Weixin Channels (视频号) videos are not implemented yet.
 
 ## What it does
 
 | MCP tool | Result |
 | --- | --- |
-| `resolve_video` | Resolve a Bilibili video URL (`?p=N` selects a part), `b23.tv` short link, BV ID, or av ID to title, duration, author/UID, publication time, engagement counts, and `aid`/`cid`. Also resolves Bilibili bangumi (`/bangumi/play/ep|ss|md`) and course (`/cheese/play/ep|ss`) episodes, dynamics/opus (`/opus/<id>`, `t.bilibili.com/<id>`) and columns (`/read/cv<id>`) to metadata plus body text and image URLs. Also resolves a Douyin video, image post (`/note/<id>`), long article (`/article/<id>`), `?modal_id=` link, `v.douyin.com` share link, or aweme id to title, duration, author, publication time, interaction counts and `extras.kind` (`video`/`images`/`article`). Also resolves a Weixin article URL (`mp.weixin.qq.com/s/<id>` or `mp.weixin.qq.com/s?__biz=...`) to title, account, author, publication time, body text and image URLs. |
+| `resolve_video` | Resolve a Bilibili video URL (`?p=N` selects a part), `b23.tv` short link, BV ID, or av ID to title, duration, author/UID, publication time, engagement counts, and `aid`/`cid`. Also resolves Bilibili bangumi (`/bangumi/play/ep|ss|md`) and course (`/cheese/play/ep|ss`) episodes, dynamics/opus (`/opus/<id>`, `t.bilibili.com/<id>`) and columns (`/read/cv<id>`) to metadata plus body text and image URLs. Also resolves a Douyin video, image post (`/note/<id>`), long article (`/article/<id>`), `?modal_id=` link, `v.douyin.com` share link, or aweme id to title, duration, author, publication time, interaction counts and `extras.kind` (`video`/`images`/`article`). Also resolves a Weixin article URL (`mp.weixin.qq.com/s/<id>` or `mp.weixin.qq.com/s?__biz=...`) to title, account, author, publication time, body text and image URLs. Also resolves Xiaohongshu video and image notes with engagement counts when available. |
 | `fetch_assets` | Fetch available subtitles, optionally transcribe speech and/or extract keyframes; save an `AssetManifest` and local files. Text only by default; frames must be asked for. For Weixin articles, writes `article.md` / `article.html` and optionally downloads article images. |
 | `get_cached` | Read a previously saved manifest without re-downloading its media. |
 | `summarize` | Optionally send cached text and up to six frames to a configured OpenAI-compatible chat/vision endpoint for a structured summary. |
@@ -28,6 +28,14 @@ The workflow is **resolve → fetch → analyze**: the client may analyze the re
 7. Local whisper.cpp output is post-processed before it is written: Traditional Chinese is converted to Simplified with OpenCC, consecutive segments repeated by background music are collapsed, and segments are merged into paragraphs at pauses or at a character limit instead of one line per segment. The timestamped raw segments stay next to `asr.txt` as `asr.json`.
 
 Default `fetch_assets` options are `wantSubtitles: true`, `wantKeyframes: false`, and `keyframeIntervalSec: 10`, so an optionless call returns **text only** — platform subtitles, or a transcript — and never downloads a video just to sample it. `wantAsr` is **on by default whenever `VIDEO_MCP_ASR_PROVIDER` is configured** (it is skipped automatically when the platform already provides subtitles) and only an explicit `false` turns it off. Pass `wantKeyframes: true` when the model needs to see the picture; storyboard tiles are then cropped without downloading the video (Douyin has no storyboard, so it downloads the mp4), and after extraction or transcription that mp4 is deleted unless `VIDEO_MCP_KEEP_MEDIA=1`. Storyboard frames are thumbnails, not full-resolution frames; AI-generated interpretations and ASR text should be checked against the source.
+
+### Xiaohongshu (experimental)
+
+Public video and image notes are supported via full `xiaohongshu.com/explore/<id>` or `/discovery/item/<id>` URLs and `xhslink.com` or `xhslink.cn` share links (including pasted share text). Keep the complete `xsec_token` and other parameters. Only individual notes are supported, not profiles or collections.
+
+`resolve_video` reads likes, comments, favorites and shares from the note data without extra requests. Unknown counts are omitted; an explicit zero is preserved. Abbreviations such as `1.2万` become approximate numbers (12,000); a trailing `+` gives a lower bound.
+
+The note page is fetched using the system `curl` executable (Windows includes `curl.exe`; on other systems install curl and put it on PATH). Public links are tried without login first. If needed, the adapter can use cookies from `VIDEO_MCP_XHS_COOKIES`, `VIDEO_MCP_XHS_COOKIE_FILE`, or `.xhs-cookies.txt` in the repo root. This does not guarantee access to expired links or inaccessible notes; try a fresh share link. Video transcripts and frames require ASR/ffmpeg as configured elsewhere; video descriptions are returned in manifest notes. Image-note text is saved as `article.md`, and images are downloaded only when `wantKeyframes` is true. A caption alone may not describe the images. Respect the platform's rules and the rights of content owners.
 
 ### How Douyin assets are obtained
 
