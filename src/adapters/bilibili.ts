@@ -195,15 +195,25 @@ interface PlayerResponse {
   };
 }
 
+interface PlayUrlBackups {
+  backupUrl?: string[];
+  backup_url?: string[];
+}
+
+interface PlayUrlDashStream extends PlayUrlBackups {
+  baseUrl?: string;
+  base_url?: string;
+}
+
 interface PlayUrlResponse {
   code: number;
   message: string;
   data?: {
     dash?: {
-      audio?: Array<{ baseUrl?: string; base_url?: string }>;
-      video?: Array<{ baseUrl?: string; base_url?: string }>;
+      audio?: PlayUrlDashStream[];
+      video?: PlayUrlDashStream[];
     };
-    durl?: Array<{ url: string }>;
+    durl?: Array<PlayUrlBackups & { url?: string }>;
   };
 }
 
@@ -565,35 +575,74 @@ export class BilibiliAdapter implements PlatformAdapter {
       );
     }
 
-    const audioUrl =
-      play.data.dash?.audio?.[0]?.baseUrl ||
-      play.data.dash?.audio?.[0]?.base_url;
-    const videoUrl =
-      play.data.dash?.video?.[0]?.baseUrl ||
-      play.data.dash?.video?.[0]?.base_url ||
-      play.data.durl?.[0]?.url;
+    const audioUrls = play.data.dash?.audio?.flatMap(dashStreamUrls) ?? [];
+    const dashVideoUrls = play.data.dash?.video?.flatMap(dashStreamUrls) ?? [];
+    // durl 的后续项可能是视频的后续分段，不能当作第一段的备用地址。
+    const firstSegment = play.data.durl?.[0];
+    const durlUrls = firstSegment ? [firstSegment.url, ...playUrlBackups(firstSegment)] : [];
+    const errors: string[] = [];
 
-    if (audioUrl) {
+    if (audioUrls.length) {
       const audioPath = path.join(destDir, "audio.m4s");
-      await downloadBinary(audioUrl, audioPath);
-      result.audioPath = audioPath;
+      try {
+        if (await downloadPlayUrlCandidates(audioUrls, audioPath)) result.audioPath = audioPath;
+      } catch (err) {
+        errors.push(`Audio: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
-    // 仅转写时如果没有独立音轨，才下载可能含音频的视频流。
-    if (videoUrl && (needVideo || (needAudio && !audioUrl))) {
+    // 转写没有可用的独立音轨时，优先尝试可能同时含画面和声音的 durl。
+    if (needVideo || (needAudio && !result.audioPath)) {
+      const videoUrls = needAudio && !result.audioPath
+        ? [...durlUrls, ...dashVideoUrls]
+        : [...dashVideoUrls, ...durlUrls];
       const videoPath = path.join(destDir, "video.m4s");
-      await downloadBinary(videoUrl, videoPath);
-      result.videoPath = videoPath;
+      try {
+        if (await downloadPlayUrlCandidates(videoUrls, videoPath)) result.videoPath = videoPath;
+      } catch (err) {
+        errors.push(`Video: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
     if (!result.audioPath && !result.videoPath && !result.subtitleText) {
+      if (errors.length) throw new VideoMcpError(errors.join("; "), "DOWNLOAD_FAILED");
       throw new VideoMcpError(
         "No media or subtitles available. Install yt-dlp or try a video with public CC subtitles.",
         "DOWNLOAD_FAILED",
       );
     }
 
+    if (errors.length) result.notes = errors;
     return result;
   }
+}
+
+function playUrlBackups(stream: PlayUrlBackups): string[] {
+  return [...(stream.backupUrl ?? []), ...(stream.backup_url ?? [])];
+}
+
+function dashStreamUrls(stream: PlayUrlDashStream): Array<string | undefined> {
+  return [stream.baseUrl, stream.base_url, ...playUrlBackups(stream)];
+}
+
+async function downloadPlayUrlCandidates(
+  urls: Array<string | undefined>,
+  dest: string,
+): Promise<boolean> {
+  let lastError: unknown;
+  const candidates = new Set(urls.filter((url): url is string => !!url?.trim()));
+  for (const url of candidates) {
+    try {
+      await downloadBinary(url, dest);
+      return true;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  if (candidates.size) {
+    const reason = lastError instanceof Error ? lastError.message : String(lastError);
+    throw new VideoMcpError(`Tried ${candidates.size} media addresses; last error: ${reason}`, "DOWNLOAD_FAILED");
+  }
+  return false;
 }
 
 async function downloadBinary(url: string, dest: string): Promise<void> {

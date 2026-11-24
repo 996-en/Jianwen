@@ -232,7 +232,7 @@ describe("BilibiliAdapter.resolve", () => {
 });
 
 describe("BilibiliAdapter.fetchMedia", () => {
-  it("无字幕、只需 ASR 时仅下载音轨，不请求视频流", async () => {
+  it("只需 ASR 时，依次尝试音轨主地址、备用地址和其他音轨，不下载视频", async () => {
     const originalFetch = globalThis.fetch;
     const originalPath = process.env.PATH;
     // 不依赖本机是否安装了 yt-dlp，固定测试公开接口的音频下载分支。
@@ -248,12 +248,22 @@ describe("BilibiliAdapter.fetchMedia", () => {
       if (url.includes("/x/player/playurl?")) {
         return Response.json({ code: 0, data: {
           dash: {
-            audio: [{ baseUrl: "https://example.com/audio.m4s" }],
+            audio: [
+              {
+                baseUrl: "https://example.com/audio.m4s",
+                backupUrl: ["https://example.com/audio-backup.m4s"],
+                backup_url: ["https://example.com/audio-backup.m4s"],
+              },
+              { base_url: "https://example.com/other-audio.m4s" },
+            ],
             video: [{ baseUrl: "https://example.com/video.m4s" }],
           },
         } });
       }
-      if (url === "https://example.com/audio.m4s") return new Response("audio bytes");
+      if (url.endsWith("/audio.m4s") || url.endsWith("/audio-backup.m4s")) {
+        return new Response(null, { status: 403 });
+      }
+      if (url.endsWith("/other-audio.m4s")) return new Response("audio bytes");
       throw new Error(`意外请求: ${url}`);
     };
     try {
@@ -267,13 +277,96 @@ describe("BilibiliAdapter.fetchMedia", () => {
       });
       assert.equal(await fs.readFile(result.audioPath!, "utf8"), "audio bytes");
       assert.equal(result.videoPath, undefined);
-      assert.ok(!requested.includes("https://example.com/video.m4s"));
+      assert.deepEqual(requested.filter((url) => url.startsWith("https://example.com/")), [
+        "https://example.com/audio.m4s",
+        "https://example.com/audio-backup.m4s",
+        "https://example.com/other-audio.m4s",
+      ]);
     } finally {
       globalThis.fetch = originalFetch;
       if (originalPath === undefined) delete process.env.PATH;
       else process.env.PATH = originalPath;
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("故事板不可用时，用 DASH 视频备用地址下载画面", async (t) => {
+    const originalPath = process.env.PATH;
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bili-video-test-"));
+    process.env.PATH = os.tmpdir();
+    t.after(async () => {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    const requested: string[] = [];
+    t.mock.method(globalThis, "fetch", async (input: string) => {
+      const url = String(input);
+      if (url.includes("/x/player/playurl?")) {
+        return Response.json({ code: 0, data: {
+          dash: { video: [{
+            base_url: "https://example.com/video.m4s",
+            backupUrl: ["https://example.com/video-copy.m4s"],
+          }] },
+          durl: [{ url: "https://example.com/muxed.mp4" }],
+        } });
+      }
+      if (url.startsWith("https://example.com/")) requested.push(url);
+      if (url.endsWith("/video-copy.m4s")) return new Response("video bytes");
+      return new Response(null, { status: 404 });
+    });
+    const result = await new BilibiliAdapter().fetchMedia({
+      platform: "bilibili", id: "BV1GJ411x7h7", title: "测试视频",
+      durationSec: 10, author: "UP", pageUrl: "https://www.bilibili.com/video/BV1GJ411x7h7",
+      extras: { aid: 123, cid: 456 },
+    }, dir, { wantSubtitles: false, wantKeyframes: true });
+    assert.equal(await fs.readFile(result.videoPath!, "utf8"), "video bytes");
+    assert.deepEqual(requested, ["https://example.com/video.m4s", "https://example.com/video-copy.m4s"]);
+  });
+
+  it("音轨均失败时尝试 durl 首段及备用地址，不把后续分段当作备用", async (t) => {
+    const originalPath = process.env.PATH;
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bili-durl-test-"));
+    process.env.PATH = os.tmpdir();
+    t.after(async () => {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    const requested: string[] = [];
+    let backupOk = true;
+    t.mock.method(globalThis, "fetch", async (input: string) => {
+      const url = String(input);
+      if (url.includes("/x/player/playurl?")) {
+        return Response.json({ code: 0, data: {
+          dash: { audio: [{ baseUrl: "https://example.com/audio.m4s" }] },
+          durl: [
+            { url: "https://example.com/part1", backup_url: ["https://example.com/part1-copy"] },
+            { url: "https://example.com/part2" },
+          ],
+        } });
+      }
+      requested.push(url);
+      if (backupOk && url.endsWith("/part1-copy")) return new Response("video with audio");
+      return new Response(null, { status: 404 });
+    });
+    const ref = {
+      platform: "bilibili", id: "BV1GJ411x7h7", title: "测试视频",
+      durationSec: 10, author: "UP", pageUrl: "https://www.bilibili.com/video/BV1GJ411x7h7",
+      extras: { aid: 123, cid: 456 },
+    };
+    const adapter = new BilibiliAdapter();
+    const options = { wantSubtitles: false, wantAsr: true };
+    const result = await adapter.fetchMedia(ref, dir, options);
+    assert.equal(result.audioPath, undefined);
+    assert.equal(await fs.readFile(result.videoPath!, "utf8"), "video with audio");
+    const expected = ["https://example.com/audio.m4s", "https://example.com/part1", "https://example.com/part1-copy"];
+    assert.deepEqual(requested, expected);
+
+    backupOk = false;
+    requested.length = 0;
+    await assert.rejects(() => adapter.fetchMedia(ref, dir, options), { code: "DOWNLOAD_FAILED" });
+    assert.deepEqual(requested, expected);
   });
 
   it("只请求字幕时不下载媒体，字幕可用时也不为 ASR 下载媒体", async () => {

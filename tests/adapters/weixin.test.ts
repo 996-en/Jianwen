@@ -338,35 +338,77 @@ describe("WeixinAdapter.resolve", () => {
 });
 
 describe("WeixinAdapter.fetchMedia", () => {
-  it("写入 article.md/html，并按 wantKeyframes 下载正文图片", async () => {
+  it("保留正文结构和图片位置，已下载图片用相对路径，失败图片保留远程地址", async () => {
     const originalFetch = globalThis.fetch;
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "weixin-fetch-test-"));
+    const remote = "https://mmbiz.qpic.cn/mmbiz_jpg/abc/0?wx_fmt=jpeg&from=appmsg";
+    const remote2 = "https://mmbiz.qpic.cn/mmbiz_jpg/def/0";
+    const html = ARTICLE_HTML.replace("</section>", `</section>
+      <section><h2>小标题</h2><ul><li>清单 <strong>加粗</strong></li></ul>
+      <p><a href="/s/related">相关阅读</a> <a href="jav&#x61;script:alert(1)">无效链接</a></p>
+      <p><img data-original="${remote2}"></p><p>中间段</p></section>`)
+      .replace("</div>\n</body>", "<p>末尾段</p></div>\n</body>");
+    const imageRequests: string[] = [];
     globalThis.fetch = async (input) => {
       const url = String(input);
-      if (url.includes("mmbiz.qpic.cn")) {
+      if (url === remote2) {
+        imageRequests.push(url);
+        return new Response(null, { status: 404 });
+      }
+      if (url === remote) {
+        imageRequests.push(url);
         return new Response(new Uint8Array([137, 80, 78, 71]), {
           status: 200,
           headers: { "content-type": "image/png" },
         });
       }
-      return articleResponse();
+      return new Response(html);
     };
     try {
       clearWeixinCache();
       const adapter = new WeixinAdapter();
       const ref = await adapter.resolve(SHORT_URL);
+      const textOnly = await adapter.fetchMedia(ref, dir);
+      const textOnlyMd = await fs.readFile(textOnly.articlePath!, "utf8");
+      assert.equal(textOnly.imagePaths, undefined);
+      assert.deepEqual(imageRequests, []);
+      assert.ok(textOnlyMd.includes(`![图片2](${remote})`));
+
       const media = await adapter.fetchMedia(ref, dir, { wantKeyframes: true });
       assert.match(media.articleText ?? "", /第二段/);
-      assert.equal(media.imagePaths?.length, 1);
-      assert.equal(path.extname(media.imagePaths![0]!), ".png");
-      assert.equal(await exists(media.articlePath!), true);
-      assert.equal(await exists(media.articleHtmlPath!), true);
-      assert.match(await fs.readFile(media.articlePath!, "utf8"), /## 图片/);
+      assert.deepEqual(imageRequests, [remote2, remote]);
+      assert.deepEqual(media.imagePaths, [path.join(dir, "images", "002.png")]);
+      assert.equal(await exists(media.imagePaths![0]!), true);
+      assert.deepEqual(media.notes, ["Downloaded 1/2 article images."]);
+      assert.equal(await fs.readFile(media.articleHtmlPath!, "utf8"), html);
+      const md = await fs.readFile(media.articlePath!, "utf8");
+      assert.match(md, /## 小标题\n\n- +清单 \*\*加粗\*\*/);
+      assert.match(md, /\[相关阅读\]\(https:\/\/mp\.weixin\.qq\.com\/s\/related\) 无效链接/);
+      assert.doesNotMatch(md, /javascript:|## 图片/);
+      assert.ok(md.includes(`![图片1](${remote2})`));
+      assert.ok(md.indexOf(remote2) < md.indexOf("中间段"));
+      assert.match(md, /中间段\s+!\[图片2\]\(images\/002\.png\)\s+末尾段/);
     } finally {
       globalThis.fetch = originalFetch;
       clearWeixinCache();
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("没有正文位置的图片分享页仍在末尾列出图片", async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "weixin-image-post-test-"));
+    clearWeixinCache();
+    t.after(async () => {
+      clearWeixinCache();
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    t.mock.method(globalThis, "fetch", async () => new Response(IMAGE_HTML));
+    const adapter = new WeixinAdapter();
+    const media = await adapter.fetchMedia(await adapter.resolve(SHORT_URL), dir);
+    assert.match(
+      await fs.readFile(media.articlePath!, "utf8"),
+      /## 图片\n\n!\[图片1\]\(https:\/\/mmbiz\.qpic\.cn\//,
+    );
   });
 });
 

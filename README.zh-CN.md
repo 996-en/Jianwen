@@ -24,7 +24,7 @@
 3. 动态（`/opus/<id>`、`t.bilibili.com/<id>`）与专栏（`/read/cv<id>`）是图文，不是视频：前者走 `opus/detail`，后者走 `article/view`。图片、转发这类动态 `opus/detail` 会返回空 item，此时改问 `web-dynamic/v1/detail`：投稿视频动态直接切换到背后的视频（`extras.fromDynamic` 记下来源动态），专栏卡转成 `cv<id>`，转发动态会把原动态正文补进正文。专栏接口需要匿名 `buvid3`/`buvid4` Cookie，会按需向 `x/frontend/finger/spi` 申请。`fetch_assets` 对图文类只写 `article.md`（含 `images/`），不做 ASR、不抽帧。
 4. 请求字幕时读取播放器接口；有可用平台字幕时即使开着 ASR 也会**优先使用字幕**，跳过语音识别。不少视频并没有开放字幕，此时只有配置了 ASR provider 才会得到文字。
 5. 画面优先从 B 站视频快照雪碧图中裁剪**最多六张**关键帧，覆盖视频前约 90%，不必下载整段视频；故事板不可用才回退到媒体下载 + ffmpeg 按间隔抽帧。后者生成的帧数可能超过六张。
-6. 显式请求 ASR 且没有取到字幕时，优先只下载音轨（`yt-dlp`，失败时尝试公开 playurl），用 ffmpeg 转成单声道 16 kHz WAV，然后调用本地 whisper.cpp；也可明确配置兼容 API 进行云端转写。没有独立音轨时可能下载视频。
+6. 显式请求 ASR 且没有取到字幕时，优先只下载音轨（`yt-dlp`，失败时尝试公开 playurl），用 ffmpeg 转成单声道 16 kHz WAV，然后调用本地 whisper.cpp；也可明确配置兼容 API 进行云端转写。普通视频走 playurl 回退时，主地址失败会尝试备用地址或其他流；取不到独立音轨时可能下载视频。
 7. 本地 whisper.cpp 的转写在写入前会做后处理：用 OpenCC 把繁体统一成简体，去掉背景音乐导致的连续重复段，再把分段按停顿或字数上限合并成段落，而不是一句一行。带时间戳的原始分段保留在同目录的 `asr.json`。
 
 `fetch_assets` 默认 `wantSubtitles: true`、`wantKeyframes: false`、`keyframeIntervalSec: 10`，所以**不传参就是“只要文字”**：平台字幕或转写稿，绝不会为了截帧去下载整片视频。`wantAsr` 在配置了 `VIDEO_MCP_ASR_PROVIDER` 时**自动开启**（有了平台字幕会自动跳过），显式传 `false` 才会关闭。需要看画面时传 `wantKeyframes: true`；B 站会用故事板雪碧图裁切，不下载视频，抖音没有故事板则会下整片 mp4（抽完默认删除，`VIDEO_MCP_KEEP_MEDIA=1` 可保留）。故事板图是预览缩略图而不是原视频高清帧，模型结论与 ASR 内容应对照原视频核查。
@@ -41,7 +41,7 @@
 
 ### 微信公众号数据从哪里来
 
-1. 支持短链 `https://mp.weixin.qq.com/s/<id>`、长链 `https://mp.weixin.qq.com/s?__biz=...&mid=...&idx=...&sn=...`，以及包含链接的整段分享文字。`resolve_video` 提取标题、公众号、作者、发布时间（`ct`）、`#js_content` 正文和最多 50 个正文图片地址；`fetch_assets` 写 `article.md` 与 `article.html`，传 `wantKeyframes: true` 时最多下载 20 张正文图到 `images/`。文章会完全跳过 ffmpeg 与 ASR。
+1. 支持短链 `https://mp.weixin.qq.com/s/<id>`、长链 `https://mp.weixin.qq.com/s?__biz=...&mid=...&idx=...&sn=...`，以及包含链接的整段分享文字。`resolve_video` 提取标题、公众号、作者、发布时间（`ct`）、`#js_content` 正文和最多 50 个正文图片地址；`fetch_assets` 写 `article.md` 与 `article.html`，传 `wantKeyframes: true` 时最多下载 20 张正文图到 `images/`。`article.md` 保留小标题、列表、链接和正文图片的位置；下载成功的图片用相对路径，其他图片保留原始网址。文章会完全跳过 ffmpeg 与 ASR。
 2. 短链通常直接返回正文；长链更容易跳 `mp/wappoc_appmsgcaptcha`（“环境异常”）。长链自带有效 `chksm` 时优先使用；否则依次尝试配置值、已学／已持久化的缓存、`mp/getappmsgext` 返回的 `pre_article_link`/`next_article_link`、百度索引，最后才用 `src/adapters/weixin-seeds.ts` 内置的 20 条人民日报文章长链兜底（每条都自带公开索引里的 `chksm`）。首次成功的 token 会立即写缓存，下次优先复用。
 3. `chksm` 是服务端签名，不能由 `biz`/`mid`/`idx`/`sn` 算出，也可能过期或轮换。内置文章只负责“起个头”：某个 token 失效会自动试下一条，全部失败才返回 `WEIXIN_CAPTCHA`，提示改用短链或配置 token。
 4. 只支持公众号**图文**；视频号视频、付费文章、已删除文章不支持。账号注销、发布者删除、作者隐私设置不可见、违规/侵权下架会返回 `NOT_FOUND`，并在错误信息里带上具体原因；只有确实遇到验证码时才返回 `WEIXIN_CAPTCHA`。请遵守微信的访问频率与使用条款；本项目不会尝试破解滑块验证码。

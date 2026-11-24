@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import TurndownService from "turndown";
 import {
   weixinChksm,
   weixinSearchEnabled,
@@ -806,17 +807,70 @@ export function parseWeixinArticle(
   };
 }
 
-function buildArticleMarkdown(article: WeixinArticle): string {
+function buildArticleMarkdown(
+  article: WeixinArticle,
+  contentHtml: string | undefined,
+  localImages: ReadonlyMap<string, string>,
+): string {
   const meta = [
     `- 公众号：${article.accountName}`,
     article.author && article.author !== article.accountName ? `- 作者：${article.author}` : "",
     article.publishedAt ? `- 发布时间：${article.publishedAt}` : "",
     `- 原文：${article.canonicalUrl}`,
   ].filter(Boolean);
-  const imageLines = article.imageUrls.length
-    ? ["", "## 图片", ...article.imageUrls.map((url, index) => `![图片${index + 1}](${url})`)]
-    : [];
-  return [`# ${article.title}`, "", ...meta, "", article.text, ...imageLines, ""].join("\n");
+  const seen = new Set<string>();
+  const imageIndexes = new Map(article.imageUrls.map((url, index) => [url, index + 1]));
+  const destination = (url: string) => url.replace(/[\s<>()]/g, encodeURIComponent);
+  const converter = new TurndownService({ headingStyle: "atx", bulletListMarker: "-" });
+  converter.remove(["script", "style", "noscript", "template"]);
+  converter.addRule("articleImage", {
+    filter: "img",
+    replacement: (_content, node) => {
+      const raw = node.getAttribute("data-src") ?? node.getAttribute("data-original") ?? node.getAttribute("src");
+      const url = raw && normalizeImageUrl(raw);
+      const index = url ? imageIndexes.get(url) : undefined;
+      if (!url || index === undefined) return "";
+      seen.add(url);
+      const alt = converter.escape((node.getAttribute("alt") ?? "").replace(/\s+/g, " ").trim() || `图片${index}`);
+      return `![${alt}](${destination(localImages.get(url) ?? url)})`;
+    },
+  });
+  converter.addRule("articleLink", {
+    filter: "a",
+    replacement: (content, node) => {
+      const href = node.getAttribute("href")?.trim();
+      if (!href || !content) return content;
+      try {
+        const url = new URL(href, article.canonicalUrl);
+        if (url.protocol === "https:" || url.protocol === "http:") {
+          return `[${content}](${destination(url.href)})`;
+        }
+      } catch {
+        // 地址无效时只保留链接文字。
+      }
+      return content;
+    },
+  });
+
+  let body = article.text;
+  if (contentHtml) {
+    try {
+      body = converter.turndown(contentHtml) || article.text;
+    } catch {
+      // HTML 转换异常时，仍能导出原有的纯文本和图片列表。
+      seen.clear();
+    }
+  }
+
+  // 没有正文位置的图（例如图片分享页或封面）保留在末尾。
+  const imageLines = article.imageUrls.flatMap((url, index) => seen.has(url)
+    ? []
+    : [`![图片${index + 1}](${destination(localImages.get(url) ?? url)})`]);
+  return [
+    `# ${article.title}`, "", ...meta, "", body,
+    ...(imageLines.length ? ["", "## 图片", "", ...imageLines] : []),
+    "",
+  ].join("\n");
 }
 
 function imageExtension(contentType: string): string {
@@ -830,10 +884,11 @@ function imageExtension(contentType: string): string {
 async function downloadArticleImages(
   urls: string[],
   destDir: string,
-): Promise<{ paths: string[]; notes: string[] }> {
+): Promise<{ paths: string[]; notes: string[]; localImages: Map<string, string> }> {
   const paths: string[] = [];
+  const localImages = new Map<string, string>();
   const notes: string[] = [];
-  if (!urls.length) return { paths, notes };
+  if (!urls.length) return { paths, notes, localImages };
 
   const imagesDir = path.join(destDir, "images");
   await fs.mkdir(imagesDir, { recursive: true });
@@ -855,9 +910,11 @@ async function downloadArticleImages(
       const buffer = Buffer.from(await response.arrayBuffer());
       if (!buffer.length) continue;
       const extension = imageExtension(response.headers.get("content-type") ?? "");
-      const file = path.join(imagesDir, `${String(index + 1).padStart(3, "0")}${extension}`);
+      const filename = `${String(index + 1).padStart(3, "0")}${extension}`;
+      const file = path.join(imagesDir, filename);
       await fs.writeFile(file, buffer);
       paths.push(file);
+      localImages.set(url, `images/${filename}`);
     } catch {
       // 单张图片失败不影响正文；最后统一记一条提示。
     }
@@ -865,7 +922,7 @@ async function downloadArticleImages(
   if (paths.length < limited.length) {
     notes.push(`Downloaded ${paths.length}/${limited.length} article images.`);
   }
-  return { paths, notes };
+  return { paths, notes, localImages };
 }
 
 export class WeixinAdapter implements PlatformAdapter {
@@ -970,22 +1027,18 @@ export class WeixinAdapter implements PlatformAdapter {
     const htmlPath = path.join(destDir, "article.html");
     const markdownPath = path.join(destDir, "article.md");
     await fs.writeFile(htmlPath, page.html, "utf8");
-    await fs.writeFile(markdownPath, buildArticleMarkdown(article), "utf8");
-
-    const notes: string[] = [];
-    let imagePaths: string[] | undefined;
-    if (options?.wantKeyframes) {
-      const downloaded = await downloadArticleImages(article.imageUrls, destDir);
-      imagePaths = downloaded.paths.length ? downloaded.paths : undefined;
-      notes.push(...downloaded.notes);
-    }
+    const downloaded = options?.wantKeyframes
+      ? await downloadArticleImages(article.imageUrls, destDir)
+      : { paths: [], notes: [], localImages: new Map<string, string>() };
+    const contentHtml = extractDivById(page.html, "js_content");
+    await fs.writeFile(markdownPath, buildArticleMarkdown(article, contentHtml, downloaded.localImages), "utf8");
 
     return {
       articleText: article.text,
       articlePath: markdownPath,
       articleHtmlPath: htmlPath,
-      imagePaths,
-      notes,
+      imagePaths: downloaded.paths.length ? downloaded.paths : undefined,
+      notes: downloaded.notes,
     };
   }
 }
